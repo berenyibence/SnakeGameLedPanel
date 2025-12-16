@@ -6,26 +6,63 @@
 class Menu {
 public:
     int selected = 0;
-    const char* options[1] = { "Snake" };
+    const char* options[2] = { "Snake", "Pong" };
+    static const int NUM_OPTIONS = 2;
 
     void draw(MatrixPanel_I2S_DMA* d, int players) {
         d->fillScreen(0);
-        d->setCursor(4, 10);
+        
+        // Smaller font spacing - reduced cursor positions
+        d->setCursor(2, 4);
         d->setTextColor(COLOR_CYAN);
-        d->print("MAIN MENU");
+        d->print("MENU");
 
-        d->setCursor(8, 30);
-        d->setTextColor(COLOR_GREEN);
-        d->print("> Snake");
+        // Menu options with smaller spacing
+        for (int i = 0; i < NUM_OPTIONS; i++) {
+            int yPos = 18 + (i * 12);  // Reduced spacing from 20 to 12
+            d->setCursor(4, yPos);
+            
+            if (i == selected) {
+                d->setTextColor(COLOR_GREEN);
+                d->print(">");
+            } else {
+                d->setTextColor(COLOR_WHITE);
+                d->print(" ");
+            }
+            
+            d->setCursor(10, yPos);
+            d->setTextColor(i == selected ? COLOR_GREEN : COLOR_WHITE);
+            d->print(options[i]);
+        }
 
-        d->setCursor(4, 55);
+        // Player count with smaller text
+        d->setCursor(2, 50);
         d->setTextColor(COLOR_YELLOW);
-        d->printf("%d Player(s)", players);
+        d->printf("%dP", players);
     }
 
     int update(ControllerManager* input) {
         ControllerPtr ctl = input->getController(0);
-        if (ctl && ctl->a()) return 0;
+        if (!ctl) return -1;
+
+        uint8_t dpad = ctl->dpad();
+        
+        // Navigate menu with D-pad
+        if ((dpad & 0x01) && selected > 0) {  // UP
+            selected--;
+            delay(150);  // Debounce
+        }
+        if ((dpad & 0x02) && selected < NUM_OPTIONS - 1) {  // DOWN
+            selected++;
+            delay(150);  // Debounce
+        }
+        
+        // Select with A button
+        if (ctl->a()) {
+            delay(200);  // Debounce
+            return selected;
+        }
+        
         return -1;
     }
 };

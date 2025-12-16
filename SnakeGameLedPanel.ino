@@ -12,6 +12,7 @@
 #include "config.h"
 #include "ControllerManager.h"
 #include "SnakeGame.h"
+#include "PongGame.h"
 #include "Menu.h"
 
 // ---------------------------------------------------------
@@ -163,9 +164,15 @@ void loop() {
         int gameSelection = menu.update(globalControllerManager);
         if (gameSelection != -1) {
           // Valid selection made
+          if (currentGame != nullptr) delete currentGame;
+          
           if (gameSelection == 0) {  // Snake
-            if (currentGame != nullptr) delete currentGame;
             currentGame = new SnakeGame();
+          } else if (gameSelection == 1) {  // Pong
+            currentGame = new PongGame();
+          }
+          
+          if (currentGame != nullptr) {
             currentGame->start();
             currentState = STATE_GAME_RUNNING;
           }
