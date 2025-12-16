@@ -5,6 +5,7 @@
 #include "GameBase.h"
 #include "ControllerManager.h"
 #include "config.h"
+#include "SmallFont.h"
 
 /**
  * PongGame - Classic Pong game implementation
@@ -206,18 +207,16 @@ public:
         display->fillScreen(COLOR_BLACK);
         
         if (gameOver) {
-            // Show winner
-            display->setCursor(8, 25);
-            display->setTextColor(COLOR_RED);
+            // Show winner with small font
             if (leftPaddle.score >= 5) {
-                display->print("P1 WINS!");
+                SmallFont::drawString(display, 8, 25, "P1 WINS!", COLOR_RED);
             } else {
-                display->print("P2 WINS!");
+                SmallFont::drawString(display, 8, 25, "P2 WINS!", COLOR_RED);
             }
             
-            display->setCursor(8, 40);
-            display->setTextColor(COLOR_WHITE);
-            display->printf("P1:%d P2:%d", leftPaddle.score, rightPaddle.score);
+            char scoreStr[16];
+            snprintf(scoreStr, sizeof(scoreStr), "P1:%d P2:%d", leftPaddle.score, rightPaddle.score);
+            SmallFont::drawString(display, 4, 35, scoreStr, COLOR_WHITE);
             return;
         }
         
@@ -252,14 +251,12 @@ public:
             ball.color
         );
         
-        // Draw scores (smaller font positioning)
-        display->setCursor(8, 4);
-        display->setTextColor(leftPaddle.color);
-        display->printf("%d", leftPaddle.score);
-        
-        display->setCursor(PANEL_RES_X - 16, 4);
-        display->setTextColor(rightPaddle.color);
-        display->printf("%d", rightPaddle.score);
+        // Draw scores with small font
+        char scoreLeft[4], scoreRight[4];
+        snprintf(scoreLeft, sizeof(scoreLeft), "%d", leftPaddle.score);
+        snprintf(scoreRight, sizeof(scoreRight), "%d", rightPaddle.score);
+        SmallFont::drawString(display, 4, 2, scoreLeft, leftPaddle.color);
+        SmallFont::drawString(display, PANEL_RES_X - 12, 2, scoreRight, rightPaddle.color);
     }
 
     bool isGameOver() override {

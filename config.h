@@ -8,6 +8,24 @@
 #define PANEL_RES_Y 64
 #define PANEL_CHAIN 1
 
+// =======================================================
+// Rendering / Refresh Stability
+// =======================================================
+// HUB75 panels can show "scanline" / tearing artifacts if the framebuffer is
+// modified while the DMA engine is actively scanning out rows (single-buffer).
+// Two mitigation options:
+// - Enable double buffering + buffer flip (preferred, uses more RAM)
+// - Limit how often we redraw the framebuffer (reduces write contention/CPU)
+//
+// Note: Double buffering requires the underlying ESP32-HUB75 library build to
+// support it; the sketch will only "present" frames when enabled.
+#define ENABLE_DOUBLE_BUFFER 1
+
+// Frame caps (in FPS). These control how often we *redraw* the framebuffer.
+// Game logic is still updated at each game's own pace.
+#define MENU_RENDER_FPS 30
+#define GAME_RENDER_FPS 30
+
 // HUB75 Pins
 #define R1_PIN 25
 #define G1_PIN 26
@@ -26,14 +44,14 @@
 #define OE_PIN 15
 #define CLK_PIN 16
 
-#define DISPLAY_COLOR_DEPTH 5
+#define DISPLAY_COLOR_DEPTH 6
 
 // =======================================================
 // Game Configuration
 // =======================================================
 #define MAX_GAMEPADS 4
 #define SNAKE_SPEED_MS 100
-#define GRID_SIZE 4
+#define GRID_SIZE 1
 
 // RGB565 Colors
 #define COLOR_BLACK   0x0000
