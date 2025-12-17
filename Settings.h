@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <EEPROM.h>
 #include "config.h"
+#include "EepromManager.h"
 
 /**
  * Settings - Persistent settings storage using EEPROM
@@ -42,10 +43,9 @@ public:
     SettingsData data;
     
     Settings() {
-        // Initialize EEPROM storage.
-        // NOTE: We intentionally DO NOT call load() here, so that any debug
+        // NOTE: EEPROM initialization is now handled centrally by EepromManager
+        // in setup(). We intentionally DO NOT call load() here, so that any debug
         // Serial output only happens after Serial.begin() in setup().
-        EEPROM.begin(512);
     }
     
     /**
@@ -53,12 +53,30 @@ public:
      */
     void load() {
         Serial.println(F("[Settings] load() called"));
+        Serial.print(F("[Settings] Reading from EEPROM address "));
+        Serial.println(EEPROM_ADDRESS);
+        
+        // Check if EEPROM is initialized
+        if (!EepromManager::isInitialized()) {
+            Serial.println(F("[Settings] ERROR: EEPROM not initialized! Call EepromManager::begin() first."));
+            resetToDefaults();
+            return;
+        }
+        
         EEPROM.get(EEPROM_ADDRESS, data);
 
         Serial.print(F("[Settings]  raw brightness from EEPROM: "));
         Serial.println(data.brightness);
         Serial.print(F("[Settings]  raw checksum from EEPROM: "));
         Serial.println(data.checksum);
+        
+        // Debug: dump first few bytes
+        Serial.print(F("[Settings]  First 8 bytes: "));
+        for (int i = 0; i < 8 && i < (int)sizeof(SettingsData); i++) {
+            Serial.print(EepromManager::readByte(EEPROM_ADDRESS + i), HEX);
+            Serial.print(F(" "));
+        }
+        Serial.println();
 
         // Basic sanity check: if brightness is clearly invalid / uninitialized,
         // treat EEPROM as empty and use defaults.
@@ -91,8 +109,26 @@ public:
         Serial.print(F("[Settings] save() brightness="));
         Serial.println(data.brightness);
         data.checksum = calculateChecksum();
+        Serial.print(F("[Settings] Writing to EEPROM address "));
+        Serial.println(EEPROM_ADDRESS);
         EEPROM.put(EEPROM_ADDRESS, data);
-        EEPROM.commit();
+        const bool ok = EepromManager::commit();
+        if (!ok) {
+            Serial.println(F("[Settings] ERROR: EEPROM commit failed!"));
+        } else {
+            // Verify write by reading back
+            SettingsData verify;
+            EEPROM.get(EEPROM_ADDRESS, verify);
+            Serial.print(F("[Settings] Verification read: brightness="));
+            Serial.print(verify.brightness);
+            Serial.print(F(", checksum="));
+            Serial.println(verify.checksum);
+            if (verify.brightness != data.brightness || verify.checksum != data.checksum) {
+                Serial.println(F("[Settings] WARNING: Verification failed! Data mismatch."));
+            } else {
+                Serial.println(F("[Settings] Verification OK"));
+            }
+        }
     }
     
     /**

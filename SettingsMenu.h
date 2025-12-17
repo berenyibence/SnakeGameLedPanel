@@ -5,6 +5,10 @@
 #include "ControllerManager.h"
 #include "SmallFont.h"
 #include "Settings.h"
+#include "ScrollableList.h"
+#include "EepromManager.h"
+#include "Leaderboard.h"
+#include "UserProfiles.h"
 
 // Forward declaration
 extern MatrixPanel_I2S_DMA* dma_display;
@@ -20,11 +24,16 @@ public:
         SETTING_GAME_SPEED,
         SETTING_SOUND,
         SETTING_RESET,
+        SETTING_REBOOT,
+        SETTING_ERASE_EEPROM,
         SETTING_BACK,
         NUM_SETTINGS
     };
     
+    // Reusable list widget (selection + input). We keep `selected` as an alias
+    // so existing engine code can keep setting `settingsMenu.selected = 0`.
     int selected = 0;
+    ScrollableList list;
     bool isActive = false;
 
     // HUD layout
@@ -69,43 +78,17 @@ public:
         SmallFont::drawString(display, 2, 6, "SETTINGS", COLOR_CYAN);
         for (int x = 0; x < PANEL_RES_X; x += 2) display->drawPixel(x, HUD_H - 1, COLOR_BLUE);
         
-        // Draw settings options
-        const char* settingNames[] = {
-            "Brightness",
-            "Game Speed",
-            "Sound",
-            "Reset",
-            "Back"
-        };
-        
-        for (int i = 0; i < NUM_SETTINGS; i++) {
-            int yPos = HUD_H + 6 + (i * 8);
-            
-            // Selection indicator
-            if (i == selected) {
-                SmallFont::drawChar(display, 2, yPos, '>', COLOR_GREEN);
-            } else {
-                SmallFont::drawChar(display, 2, yPos, ' ', COLOR_WHITE);
-            }
-            
-            // Setting name
-            SmallFont::drawString(display, 8, yPos, settingNames[i], 
-                i == selected ? COLOR_GREEN : COLOR_WHITE);
-            
-            // Draw value
-            if (i == SETTING_BRIGHTNESS) {
-                char val[8];
-                snprintf(val, sizeof(val), "%d", globalSettings.getBrightness());
-                SmallFont::drawString(display, 50, yPos, val, COLOR_YELLOW);
-            } else if (i == SETTING_GAME_SPEED) {
-                char val[4];
-                snprintf(val, sizeof(val), "%d", globalSettings.getGameSpeed());
-                SmallFont::drawString(display, 50, yPos, val, COLOR_YELLOW);
-            } else if (i == SETTING_SOUND) {
-                const char* val = globalSettings.isSoundEnabled() ? "ON" : "OFF";
-                SmallFont::drawString(display, 50, yPos, val, COLOR_YELLOW);
-            }
-        }
+        // Keep widget selection in sync with our legacy `selected` field.
+        list.selectedActual = constrain(selected, 0, NUM_SETTINGS - 1);
+
+        // Draw settings list using the reusable widget + a right-side value callback.
+        ScrollableList::Layout lay;
+        lay.hudH = HUD_H;
+        lay.visibleRows = NUM_SETTINGS; // no need to scroll right now, but consistent layout
+        list.draw(display, model, lay, ScrollableList::Colors(), &SettingsMenu::drawRightValueThunk, this);
+
+        // Sync back so engine logic keeps working.
+        selected = list.selectedActual;
     }
     
     /**
@@ -120,66 +103,24 @@ public:
         const unsigned long now = millis();
 
         // ----------------------
-        // Navigation (analog + D-pad)
+        // Navigation (analog + D-pad) - shared via ScrollableList
         // ----------------------
-        static uint8_t prevDpad = 0;
-        static uint32_t dpadNavHoldStartMs = 0;
-        static uint32_t dpadNavLastRepeatMs = 0;
-
-        // D-pad Up/Down: press once, repeat only after hold delay.
-        const bool up = (dpad & 0x01) != 0;
-        const bool down = (dpad & 0x02) != 0;
-        const bool prevUp = (prevDpad & 0x01) != 0;
-        const bool prevDown = (prevDpad & 0x02) != 0;
-
-        int navDir = 0;
-        if (up || down) {
-            if ((up && !prevUp) || (down && !prevDown)) {
-                navDir = up ? -1 : 1;
-                dpadNavHoldStartMs = (uint32_t)now;
-                dpadNavLastRepeatMs = (uint32_t)now;
-            } else if (dpadNavHoldStartMs != 0 &&
-                       (uint32_t)(now - dpadNavHoldStartMs) >= DPAD_REPEAT_DELAY_MS &&
-                       (uint32_t)(now - dpadNavLastRepeatMs) >= DPAD_REPEAT_INTERVAL_MS) {
-                navDir = up ? -1 : 1;
-                dpadNavLastRepeatMs = (uint32_t)now;
-            }
-        } else {
-            dpadNavHoldStartMs = 0;
-        }
-
-        // Analog Up/Down if D-pad isn't used.
-        static uint32_t lastAnalogNavMs = 0;
-        if (navDir == 0 && !(up || down)) {
-            const float rawY = clampf((float)InputDetail::axisY(ctl, 0) / (float)AXIS_DIVISOR, -1.0f, 1.0f);
-            const float sy = deadzone01(rawY, STICK_DEADZONE);
-            if (sy < 0) navDir = -1;
-            else if (sy > 0) navDir = 1;
-
-            if (navDir != 0) {
-                const float mag = fabsf(sy);
-                const uint32_t interval = (uint32_t)(320.0f - 160.0f * mag); // ~320ms..160ms
-                if ((uint32_t)(now - lastAnalogNavMs) > interval) lastAnalogNavMs = (uint32_t)now;
-                else navDir = 0;
-            } else {
-                lastAnalogNavMs = 0;
-            }
-        }
-
-        if (navDir < 0 && selected > 0) selected--;
-        else if (navDir > 0 && selected < NUM_SETTINGS - 1) selected++;
+        list.selectedActual = constrain(selected, 0, NUM_SETTINGS - 1);
+        const int selectIdx = list.update(input, model);
+        selected = list.selectedActual;
 
         // ----------------------
         // Adjust (analog X + D-pad Left/Right)
         // ----------------------
-        static uint32_t dpadAdjHoldStartMs = 0;
-        static uint32_t dpadAdjLastRepeatMs = 0;
-        static uint32_t lastAnalogAdjMs = 0;
+        // (Keep the old adjustment logic, but make the "prevDpad" state per-instance.)
+        const bool up = (dpad & 0x01) != 0;
+        const bool down = (dpad & 0x02) != 0;
+        (void)up; (void)down; // kept for readability symmetry with the old code.
 
         const bool left = (dpad & 0x08) != 0;
         const bool right = (dpad & 0x04) != 0;
-        const bool prevLeft = (prevDpad & 0x08) != 0;
-        const bool prevRight = (prevDpad & 0x04) != 0;
+        const bool prevLeft = (prevDpadAdj & 0x08) != 0;
+        const bool prevRight = (prevDpadAdj & 0x04) != 0;
 
         int adjDir = 0;
         if (left || right) {
@@ -214,21 +155,26 @@ public:
         }
 
         if (adjDir != 0) adjustSetting(adjDir);
-
-        // Store prev dpad for edge checks.
-        prevDpad = dpad;
+        prevDpadAdj = dpad;
         
-        // Select/Back with A button
-        static unsigned long lastSelect = 0;
-        if (ctl->a() && (now - lastSelect > 200)) {
-            lastSelect = now;
-            
+        // Select/Activate with A button (debounced by ScrollableList)
+        if (selectIdx != -1) {
             if (selected == SETTING_RESET) {
                 // Reset to defaults
                 globalSettings.resetToDefaults();
                 globalSettings.save();
                 delay(300);
                 return false;  // Stay in menu
+            } else if (selected == SETTING_REBOOT) {
+                globalSettings.save();
+                delay(150);
+                Serial.println(F("[SettingsMenu] Reboot requested"));
+                ESP.restart();
+                return true; // unreachable, but keeps control flow obvious
+            } else if (selected == SETTING_ERASE_EEPROM) {
+                Serial.println(F("[SettingsMenu] Erase EEPROM requested"));
+                eraseEepromAndReboot();
+                return true; // unreachable
             } else if (selected == SETTING_BACK) {
                 // Save all settings before going back
                 globalSettings.save();
@@ -250,6 +196,61 @@ public:
     }
     
 private:
+    // Settings list model (static strings + fixed ordering).
+    class SettingsListModel : public ListModel {
+    public:
+        const char* settingNames[NUM_SETTINGS] = { "Brightness", "Game Speed", "Sound", "Reset", "Reboot", "EraseEEP", "Back" };
+        int itemCount() const override { return NUM_SETTINGS; }
+        const char* label(int actualIndex) const override { return settingNames[actualIndex]; }
+    };
+
+    SettingsListModel model;
+
+    // Per-instance adjustment repeat state (left/right).
+    uint8_t prevDpadAdj = 0;
+    uint32_t dpadAdjHoldStartMs = 0;
+    uint32_t dpadAdjLastRepeatMs = 0;
+    uint32_t lastAnalogAdjMs = 0;
+
+    static void drawRightValueThunk(MatrixPanel_I2S_DMA* d, int actualIndex, int yBaseline, bool /*isSelected*/, void* user) {
+        ((SettingsMenu*)user)->drawRightValue(d, actualIndex, yBaseline);
+    }
+
+    void drawRightValue(MatrixPanel_I2S_DMA* display, int actualIndex, int yPos) {
+        if (actualIndex == SETTING_BRIGHTNESS) {
+            char val[8];
+            snprintf(val, sizeof(val), "%d", globalSettings.getBrightness());
+            SmallFont::drawString(display, 50, yPos, val, COLOR_YELLOW);
+        } else if (actualIndex == SETTING_GAME_SPEED) {
+            char val[4];
+            snprintf(val, sizeof(val), "%d", globalSettings.getGameSpeed());
+            SmallFont::drawString(display, 50, yPos, val, COLOR_YELLOW);
+        } else if (actualIndex == SETTING_SOUND) {
+            const char* val = globalSettings.isSoundEnabled() ? "ON" : "OFF";
+            SmallFont::drawString(display, 50, yPos, val, COLOR_YELLOW);
+        }
+    }
+
+    void eraseEepromAndReboot() {
+        // Best-effort: reset in-memory settings and wipe the EEPROM arena.
+        globalSettings.resetToDefaults();
+        globalSettings.save();
+
+        // Clear logical storages too (will rewrite their headers), then wipe all bytes.
+        (void)UserProfiles::userCount(); // force-load profiles header for debug consistency
+        Leaderboard::clearAll();
+
+        Serial.print(F("[SettingsMenu] Wiping EEPROM bytes: "));
+        Serial.println((unsigned)EepromManager::TOTAL_SIZE);
+        for (size_t i = 0; i < EepromManager::TOTAL_SIZE; i++) {
+            EepromManager::writeByte(i, 0xFF);
+        }
+        const bool ok = EepromManager::commit();
+        Serial.println(ok ? F("[SettingsMenu] EEPROM erase committed") : F("[SettingsMenu] EEPROM erase commit FAILED"));
+        delay(150);
+        ESP.restart();
+    }
+
     void adjustSetting(int delta) {
         switch (selected) {
             case SETTING_BRIGHTNESS: {

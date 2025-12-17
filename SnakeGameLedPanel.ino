@@ -22,8 +22,13 @@
 #include "EmojisGame.h"
 #include "AsteroidsGame.h"
 #include "Menu.h"
+#include "EepromManager.h"
 #include "Settings.h"
 #include "SettingsMenu.h"
+#include "LeaderboardMenu.h"
+#include "Leaderboard.h"
+#include "UserProfiles.h"
+#include "UserSelectMenu.h"
 #include "SmallFont.h"
 
 // ---------------------------------------------------------
@@ -33,6 +38,8 @@ MatrixPanel_I2S_DMA* dma_display = nullptr;
 
 Menu menu;
 SettingsMenu settingsMenu;
+LeaderboardMenu leaderboardMenu;
+UserSelectMenu userSelectMenu;
 GameBase* currentGame = nullptr;
 
 // ---------------------------------------------------------
@@ -68,6 +75,8 @@ enum AppState {
   STATE_NO_CONTROLLER,
   STATE_MENU,
   STATE_SETTINGS,
+  STATE_USER_SELECT,
+  STATE_LEADERBOARD,
   STATE_GAME_RUNNING
 };
 
@@ -75,6 +84,9 @@ AppState currentState = STATE_NO_CONTROLLER;
 // When controllers disconnect, we show the NO_CONTROLLER screen, but we keep the
 // previous state so we can resume (especially important for in-progress games).
 AppState resumeStateAfterController = STATE_MENU;
+// When a controller connects and no user is bound yet, we go through
+// STATE_USER_SELECT first, then continue here.
+AppState nextStateAfterUserSelect = STATE_MENU;
 
 // ---------------------------------------------------------
 // Setup
@@ -83,6 +95,33 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("BOOT: setup() reached");
+
+  // -----------------------------------------------------
+  // EEPROM Initialization (MUST be first, before any EEPROM operations)
+  // -----------------------------------------------------
+  if (!EepromManager::begin()) {
+    Serial.println(F("[Init] FATAL: EEPROM initialization failed!"));
+    while (true) { delay(1000); } // Halt
+  }
+
+  // Quick EEPROM header dumps for debugging persistence across reboots.
+  auto dumpRange = [&](int base, int len, const __FlashStringHelper* label) {
+    Serial.print(F("[EEPROM] dump "));
+    Serial.print(label);
+    Serial.print(F(" @"));
+    Serial.print(base);
+    Serial.print(F(": "));
+    for (int i = 0; i < len; i++) {
+      uint8_t b = EepromManager::readByte((size_t)(base + i));
+      if (b < 16) Serial.print('0');
+      Serial.print(b, HEX);
+      Serial.print(' ');
+    }
+    Serial.println();
+  };
+  dumpRange(0, 16, F("settings"));
+  dumpRange(64, 24, F("users"));
+  dumpRange(128, 32, F("leaderboard"));
 
   // -----------------------------------------------------
   // Bluetooth / Controllers
@@ -140,6 +179,12 @@ void setup() {
   // Load settings and apply brightness
   Serial.println(F("[Init] Loading settings..."));
   globalSettings.load();
+
+  // Force-load user profiles and leaderboard once at boot for debug visibility.
+  Serial.print(F("[Init] Users="));
+  Serial.println(UserProfiles::userCount());
+  Serial.print(F("[Init] Leaderboard games="));
+  Serial.println(Leaderboard::gameCount());
   uint8_t startupBrightness = globalSettings.getBrightness();
   if (startupBrightness < 30) {
     Serial.print(F("[Init] Brightness from settings too low ("));
@@ -192,15 +237,15 @@ void loop() {
     // Display "Connect Controller" screen until a device connects.
     case STATE_NO_CONTROLLER:
       if (globalControllerManager->getConnectedCount() > 0) {
-        // Resume the previous state (menu/settings/game).
-        // If we were in a game but it was deleted (or never started), fall back to menu.
-        if (resumeStateAfterController == STATE_GAME_RUNNING && currentGame == nullptr) {
-          resumeStateAfterController = STATE_MENU;
-        }
-        currentState = resumeStateAfterController;
+        // When a controller connects, always go through user selection.
+        // UserSelectMenu will show either:
+        // - a list of existing users + NEW (if any users are stored), or
+        // - the 3-letter editor directly (if no users exist yet).
+        nextStateAfterUserSelect = resumeStateAfterController;
+        userSelectMenu.beginForPad(0);
+        currentState = STATE_USER_SELECT;
         dma_display->clearScreen();
-        if (currentState == STATE_GAME_RUNNING) forceGameRender = true;
-        else forceMenuRender = true;
+        forceMenuRender = true;
       } else {
         // Render waiting screen with small font
         static unsigned long lastFrame = 0;
@@ -238,6 +283,10 @@ void loop() {
           if (gameSelection == (Menu::NUM_OPTIONS - 1)) {  // Settings (last option)
             currentState = STATE_SETTINGS;
             settingsMenu.selected = 0;
+            dma_display->clearScreen();
+            forceMenuRender = true;
+          } else if (gameSelection == (Menu::NUM_OPTIONS - 2)) { // Leaderboard (just before Settings)
+            currentState = STATE_LEADERBOARD;
             dma_display->clearScreen();
             forceMenuRender = true;
           } else {
@@ -315,6 +364,44 @@ void loop() {
       }
       break;
 
+    // --- STATE: USER SELECT ---
+    case STATE_USER_SELECT:
+      if (globalControllerManager->getConnectedCount() == 0) {
+        // If controllers disconnect mid-selection, go back to waiting.
+        currentState = STATE_NO_CONTROLLER;
+      } else {
+        if (shouldRenderNow(nowMs, lastMenuRenderMs, menuIntervalMs, forceMenuRender)) {
+          userSelectMenu.draw(dma_display, globalControllerManager);
+          presentFrame(dma_display);
+        }
+        if (userSelectMenu.update(globalControllerManager)) {
+          currentState = nextStateAfterUserSelect;
+          dma_display->clearScreen();
+          forceMenuRender = true;
+          // Debounce the confirming 'A' press so it doesn't immediately select "Snake" in the menu.
+          delay(250);
+        }
+      }
+      break;
+
+    // --- STATE: LEADERBOARD ---
+    case STATE_LEADERBOARD:
+      if (globalControllerManager->getConnectedCount() == 0) {
+        resumeStateAfterController = STATE_LEADERBOARD;
+        currentState = STATE_NO_CONTROLLER;
+      } else {
+        if (shouldRenderNow(nowMs, lastMenuRenderMs, menuIntervalMs, forceMenuRender)) {
+          leaderboardMenu.draw(dma_display, globalControllerManager);
+          presentFrame(dma_display);
+        }
+        if (leaderboardMenu.update(globalControllerManager)) {
+          currentState = STATE_MENU;
+          dma_display->clearScreen();
+          forceMenuRender = true;
+        }
+      }
+      break;
+
     // --- STATE: GAME RUNNING ---
     // Execute active game logic.
     case STATE_GAME_RUNNING:
@@ -326,6 +413,29 @@ void loop() {
         currentState = STATE_NO_CONTROLLER;
       } else {
         if (currentGame) {
+          // -----------------------------------------------------
+          // Auto-submit score to leaderboard once per game run
+          // -----------------------------------------------------
+          static GameBase* lastGamePtr = nullptr;
+          static bool submitted = false;
+          if (currentGame != lastGamePtr) {
+            lastGamePtr = currentGame;
+            submitted = false;
+          }
+          if (!submitted && currentGame->isGameOver()) {
+            // Only submit for games that opt in (see GameBase leaderboard methods).
+            // NOTE: leaderboard methods are optional with safe defaults.
+            if (currentGame->leaderboardEnabled()) {
+              char tag[4];
+              UserProfiles::getPadTag(0, tag);
+              Leaderboard::submitScore(currentGame->leaderboardId(),
+                                       currentGame->leaderboardName(),
+                                       currentGame->leaderboardScore(),
+                                       tag);
+            }
+            submitted = true;
+          }
+
           // Update per-game render pacing (some games prefer lower FPS).
           gameIntervalMs = fpsToIntervalMs(currentGame->preferredRenderFps());
 

@@ -5,51 +5,32 @@
 #include "ControllerManager.h"
 #include "SmallFont.h"
 #include "Settings.h"
+#include "ScrollableList.h"
 
-class Menu {
+class Menu : public ListModel {
 public:
-    int selected = 0;
-    int scrollOffset = 0;   // Target scroll (in visible rows)
-    float scrollPos = 0.0f; // Animated scroll position (mega smooth)
-    const char* options[10] = { "Snake", "Tron", "Pong", "Breakout", "Shooter", "Labyrinth", "Tetris", "Emojis", "Asteroids", "Settings" };
-    static const int NUM_OPTIONS = 10;
-    static const int VISIBLE_ITEMS = 7;  // 7 lines *8px + 8px HUD = 64px
+    // Main menu options (actual indices). Keep Settings LAST (engine treats it specially).
+    const char* options[11] = { "Snake", "Tron", "Pong", "Breakout", "Shooter", "Labyrinth", "Tetris", "Emojis", "Asteroids", "Leaderboard", "Settings" };
+    static const int NUM_OPTIONS = 11;
+
+    // Reusable list widget state (selection + scrolling + input).
+    ScrollableList list;
 
     // HUD layout
     static constexpr int HUD_H = 8;
-    static constexpr float SCROLL_SMOOTH = 0.18f; // 0..1 (higher = snappier)
-    static constexpr float STICK_DEADZONE = 0.22f;
-    static constexpr int16_t AXIS_DIVISOR = 512;
-    static constexpr uint16_t DPAD_REPEAT_DELAY_MS = 450;   // must hold this long before repeat
-    static constexpr uint16_t DPAD_REPEAT_INTERVAL_MS = 180;
 
-    // Bluepad32 analog helper (SFINAE) so we don't hard-depend on a single API surface.
-    struct InputDetail {
-        template <typename T>
-        static auto axisY(T* c, int) -> decltype(c->axisY(), int16_t()) { return (int16_t)c->axisY(); }
-        template <typename T>
-        static int16_t axisY(T*, ...) { return 0; }
-    };
-
-    static inline float clampf(float v, float lo, float hi) { return (v < lo) ? lo : (v > hi) ? hi : v; }
-    static inline float deadzone01(float v, float dz) {
-        const float a = fabsf(v);
-        if (a <= dz) return 0.0f;
-        const float s = (a - dz) / (1.0f - dz);
-        return (v < 0) ? -s : s;
-    }
+    // Context for visibility filtering (set at draw/update time).
+    int playersContext = 0;
     
-    // Get actual number of visible options based on player count
-    int getVisibleOptionsCount(int players) {
-        int count = 0;
-        for (int i = 0; i < NUM_OPTIONS; i++) {
-            if (isOptionVisible(i, players)) count++;
-        }
-        return count;
-    }
+    // -----------------------------------------------------
+    // ListModel (for ScrollableList)
+    // -----------------------------------------------------
+    int itemCount() const override { return NUM_OPTIONS; }
+    const char* label(int actualIndex) const override { return options[actualIndex]; }
+    bool isItemVisible(int index) const override { return isOptionVisible(index, playersContext); }
     
     // Check if option should be visible
-    bool isOptionVisible(int index, int players) {
+    bool isOptionVisible(int index, int players) const {
         if (index == 6) {  // Tetris
             return players == 1;
         }
@@ -59,36 +40,10 @@ public:
         // All others always visible
         return true;  // All other options always visible
     }
-    
-    // Get actual option index from visible index
-    int getActualIndex(int visibleIndex, int players) {
-        int actual = 0;
-        int visible = 0;
-        
-        for (int i = 0; i < NUM_OPTIONS; i++) {
-            if (isOptionVisible(i, players)) {
-                if (visible == visibleIndex) {
-                    return i;
-                }
-                visible++;
-            }
-        }
-        return visibleIndex;  // Fallback
-    }
-    
-    // Get visible index from actual index
-    int getVisibleIndex(int actualIndex, int players) {
-        int visible = 0;
-        for (int i = 0; i < actualIndex; i++) {
-            if (isOptionVisible(i, players)) {
-                visible++;
-            }
-        }
-        return visible;
-    }
 
     void draw(MatrixPanel_I2S_DMA* d, ControllerManager* input) {
         const int players = (input != nullptr) ? input->getConnectedCount() : 0;
+        playersContext = players;
         d->fillScreen(0);
         
         // ----------------------
@@ -116,195 +71,31 @@ public:
             px += TOKEN_STRIDE;
         }
 
-        // Count visible options
-        int visibleCount = 0;
-        for (int i = 0; i < NUM_OPTIONS; i++) {
-            if (isOptionVisible(i, players)) {
-                visibleCount++;
-            }
-        }
-        
-        // Ensure selected is valid
-        int visibleSelected = getVisibleIndex(selected, players);
-        if (visibleSelected >= visibleCount) {
-            visibleSelected = visibleCount - 1;
-            // Find actual index
-            for (int i = 0; i < NUM_OPTIONS; i++) {
-                if (isOptionVisible(i, players)) {
-                    if (getVisibleIndex(i, players) == visibleSelected) {
-                        selected = i;
-                        break;
-                    }
-                }
-            }
-        }
-        
-        // Calculate visible range for scrolling (target offset)
-        int maxVisible = VISIBLE_ITEMS;
-        if (visibleSelected < scrollOffset) {
-            scrollOffset = visibleSelected;
-        }
-        if (visibleSelected >= scrollOffset + maxVisible) {
-            scrollOffset = visibleSelected - maxVisible + 1;
-        }
-
-        // Smooth scroll animation towards target.
-        scrollPos = scrollPos + ((float)scrollOffset - scrollPos) * SCROLL_SMOOTH;
-        
-        // Draw options with animated scroll (mega smooth)
-        // List layout:
-        // - TomThumb uses a baseline Y; keep the baseline safely below the HUD and within screen.
-        // - With 7 rows at 8px spacing, baselines span [HUD_H+6 .. HUD_H+6+48] => [14..62].
-        const float listBaseY = (float)HUD_H + 6.0f;
-        const float listTopBaseline = listBaseY;
-        const float listBottomBaseline = listBaseY + (float)(VISIBLE_ITEMS - 1) * 8.0f;
-
-        // If the selected row would be clipped due to scroll animation lag, snap scrollPos to the
-        // target so selection is always visible.
-        {
-            const float selY = listBaseY + ((float)visibleSelected - scrollPos) * 8.0f;
-            if (selY < listTopBaseline || selY > listBottomBaseline) {
-                scrollPos = (float)scrollOffset;
-            }
-        }
-        int visibleIdx = 0;
-        for (int i = 0; i < NUM_OPTIONS; i++) {
-            if (!isOptionVisible(i, players)) continue;
-            
-            const float yF = listBaseY + ((float)visibleIdx - scrollPos) * 8.0f;
-            const int yPos = (int)yF;
-            // Hard clip so we never draw into the HUD, while allowing the full 7 visible rows.
-            // (Baselines range 14..62; allow exactly that range.)
-            if (yPos < (int)listTopBaseline || yPos > (int)listBottomBaseline) {
-                visibleIdx++;
-                continue;
-            }
-                
-            // Draw selection indicator
-            if (i == selected) {
-                SmallFont::drawChar(d, 2, yPos, '>', COLOR_GREEN);
-            } else {
-                SmallFont::drawChar(d, 2, yPos, ' ', COLOR_WHITE);
-            }
-            
-            // Draw option name
-            SmallFont::drawString(d, 6, yPos, options[i], 
-                i == selected ? COLOR_GREEN : COLOR_WHITE);
-            visibleIdx++;
-        }
-        
-        // Scroll indicators (if needed)
-        if (scrollOffset > 0) {
-            // Up arrow indicator
-            d->drawPixel(60, HUD_H + 1, COLOR_WHITE);
-            d->drawPixel(59, HUD_H + 2, COLOR_WHITE);
-            d->drawPixel(61, HUD_H + 2, COLOR_WHITE);
-        }
-        if (scrollOffset + maxVisible < visibleCount) {
-            // Down arrow indicator
-            d->drawPixel(60, 62, COLOR_WHITE);
-            d->drawPixel(59, 61, COLOR_WHITE);
-            d->drawPixel(61, 61, COLOR_WHITE);
-        }
+        // Draw list below HUD using the reusable widget.
+        ScrollableList::Layout lay;
+        lay.hudH = HUD_H;
+        lay.visibleRows = 7;
+        list.selectedActual = constrain(list.selectedActual, 0, NUM_OPTIONS - 1);
+        list.draw(d, *this, lay);
     }
 
     int update(ControllerManager* input) {
-        ControllerPtr ctl = input->getController(0);
-        if (!ctl) return -1;
-
-        int players = input->getConnectedCount();
-        const uint8_t dpad = ctl->dpad();
-        static unsigned long lastAnalogMove = 0;
-        static uint8_t prevDpad = 0;
-        static uint32_t dpadHoldStartMs = 0;
-        static uint32_t lastDpadRepeatMs = 0;
-        unsigned long now = millis();
-        
-        // ----------------------
-        // Navigate menu (analog + D-pad)
-        // ----------------------
-        // 1) D-pad: single-step on press, and ONLY repeat after a hold delay.
-        int navDir = 0;
-        const bool dUp = (dpad & 0x01) != 0;
-        const bool dDown = (dpad & 0x02) != 0;
-        const bool prevUp = (prevDpad & 0x01) != 0;
-        const bool prevDown = (prevDpad & 0x02) != 0;
-        prevDpad = dpad;
-
-        if (dUp || dDown) {
-            if ((dUp && !prevUp) || (dDown && !prevDown)) {
-                // Edge press => exactly one step.
-                navDir = dUp ? -1 : 1;
-                dpadHoldStartMs = (uint32_t)now;
-                lastDpadRepeatMs = (uint32_t)now;
-            } else {
-                // Held => repeat only after delay.
-                if (dpadHoldStartMs != 0 &&
-                    (uint32_t)(now - dpadHoldStartMs) >= DPAD_REPEAT_DELAY_MS &&
-                    (uint32_t)(now - lastDpadRepeatMs) >= DPAD_REPEAT_INTERVAL_MS) {
-                    navDir = dUp ? -1 : 1;
-                    lastDpadRepeatMs = (uint32_t)now;
-                }
-            }
-        } else {
-            dpadHoldStartMs = 0;
-        }
-
-        // 2) Analog: variable repeat rate based on magnitude (ignored while D-pad is held).
-        if (navDir == 0 && !(dUp || dDown)) {
-            const float rawY = clampf((float)InputDetail::axisY(ctl, 0) / (float)AXIS_DIVISOR, -1.0f, 1.0f);
-            const float sy = deadzone01(rawY, STICK_DEADZONE);
-            if (sy < 0) navDir = -1;
-            else if (sy > 0) navDir = 1;
-
-            if (navDir != 0) {
-                const float mag = fabsf(sy);
-                // Slower analog scrolling (overall).
-                const uint32_t interval = (uint32_t)(320.0f - 160.0f * mag); // ~320ms..160ms
-                if ((uint32_t)(now - lastAnalogMove) > interval) {
-                    lastAnalogMove = now;
-                } else {
-                    navDir = 0;
-                }
-            } else {
-                // Reset so next analog nudge feels immediate.
-                lastAnalogMove = 0;
-            }
-        }
-
-        if (navDir != 0) {
-            {
-                const int currentVisible = getVisibleIndex(selected, players);
-                const int visibleCount = getVisibleOptionsCount(players);
-
-                if (navDir < 0 && currentVisible > 0) {
-                    for (int i = selected - 1; i >= 0; i--) {
-                        if (isOptionVisible(i, players)) { selected = i; break; }
-                    }
-                } else if (navDir > 0 && currentVisible < visibleCount - 1) {
-                    for (int i = selected + 1; i < NUM_OPTIONS; i++) {
-                        if (isOptionVisible(i, players)) { selected = i; break; }
-                    }
-                }
-            }
-        }
-        
-        // Select with A button
-        static unsigned long lastSelect = 0;
-        if (ctl->a() && (now - lastSelect > 200)) {
-            lastSelect = now;
-            return selected;
-        }
+        if (!input) return -1;
+        playersContext = input->getConnectedCount();
+        const int sel = list.update(input, *this);
 
         // Cycle player color with Y button (debounced)
+        ControllerPtr ctl = input->getController(0);
+        const unsigned long now = millis();
         static unsigned long lastColorChange = 0;
         // Bluepad32 exposes ABXY on most pads; if a controller doesn't have Y, this stays false.
-        if (ctl->y() && (now - lastColorChange > 200)) {
+        if (ctl && ctl->y() && (now - lastColorChange > 200)) {
             lastColorChange = now;
             globalSettings.cyclePlayerColor(1);
             globalSettings.save();
         }
-        
+
+        if (sel != -1) return sel;
         return -1;
     }
 };

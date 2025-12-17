@@ -533,4 +533,19 @@ public:
     bool isGameOver() override {
         return gameOver;
     }
+
+    // ------------------------------
+    // Leaderboard integration
+    // ------------------------------
+    bool leaderboardEnabled() const override { return true; }
+    const char* leaderboardId() const override { return "snake"; }
+    const char* leaderboardName() const override { return "Snake"; }
+    uint32_t leaderboardScore() const override {
+        // Multiplayer: submit the best individual score of the round.
+        uint32_t best = 0;
+        for (const auto& s : snakes) {
+            if ((uint32_t)s.score > best) best = (uint32_t)s.score;
+        }
+        return best;
+    }
 };

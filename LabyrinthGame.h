@@ -669,5 +669,17 @@ public:
     bool isGameOver() override {
         return gameOver || gameWon;
     }
+
+    // ------------------------------
+    // Leaderboard integration
+    // ------------------------------
+    bool leaderboardEnabled() const override { return true; }
+    const char* leaderboardId() const override { return "labyrinth"; }
+    const char* leaderboardName() const override { return "Labyrinth"; }
+    uint32_t leaderboardScore() const override {
+        // This game is progression-based; we treat "level reached" as the score.
+        // (Higher is better.)
+        return (level > 0) ? (uint32_t)level : 0u;
+    }
 };
 

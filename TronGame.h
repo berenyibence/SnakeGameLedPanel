@@ -513,6 +513,22 @@ public:
     bool isGameOver() override {
         return gameOver;
     }
+
+    // ------------------------------
+    // Leaderboard integration
+    // ------------------------------
+    bool leaderboardEnabled() const override { return true; }
+    const char* leaderboardId() const override { return "tron"; }
+    const char* leaderboardName() const override { return "Tron"; }
+    uint32_t leaderboardScore() const override {
+        // Submit the highest match score achieved by any player.
+        uint32_t best = 0;
+        for (int i = 0; i < MAX_GAMEPADS; i++) {
+            if (!players[i].active) continue;
+            if ((uint32_t)players[i].score > best) best = (uint32_t)players[i].score;
+        }
+        return best;
+    }
 };
 
 

@@ -389,5 +389,17 @@ public:
     bool isGameOver() override {
         return gameOver;
     }
+
+    // ------------------------------
+    // Leaderboard integration
+    // ------------------------------
+    bool leaderboardEnabled() const override { return true; }
+    const char* leaderboardId() const override { return "pong"; }
+    const char* leaderboardName() const override { return "Pong"; }
+    uint32_t leaderboardScore() const override {
+        // Submit the higher score (covers 1P and 2P).
+        const int best = (leftPaddle.score > rightPaddle.score) ? leftPaddle.score : rightPaddle.score;
+        return (best > 0) ? (uint32_t)best : 0u;
+    }
 };
 

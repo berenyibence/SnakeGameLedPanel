@@ -11,6 +11,19 @@ public:
     virtual bool isGameOver() = 0;
     virtual void reset() = 0;
 
+    // -----------------------------------------------------
+    // Optional: Leaderboard integration
+    // -----------------------------------------------------
+    // Games can opt-in by overriding these. The engine can then auto-submit scores
+    // when `isGameOver()` becomes true.
+    //
+    // NOTE: We keep these optional with safe defaults to avoid forcing all games
+    // (and non-game applets) to implement scoring.
+    virtual bool leaderboardEnabled() const { return false; }
+    virtual const char* leaderboardId() const { return ""; }     // stable id (e.g. "snake")
+    virtual const char* leaderboardName() const { return ""; }   // display name (e.g. "Snake")
+    virtual uint32_t leaderboardScore() const { return 0; }      // score to submit
+
     /**
      * Preferred render FPS for this game.
      *

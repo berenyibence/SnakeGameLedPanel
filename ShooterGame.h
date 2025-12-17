@@ -388,5 +388,13 @@ public:
     bool isGameOver() override {
         return gameOver;
     }
+
+    // ------------------------------
+    // Leaderboard integration
+    // ------------------------------
+    bool leaderboardEnabled() const override { return true; }
+    const char* leaderboardId() const override { return "shooter"; }
+    const char* leaderboardName() const override { return "Shooter"; }
+    uint32_t leaderboardScore() const override { return (score > 0) ? (uint32_t)score : 0u; }
 };
 
