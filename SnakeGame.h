@@ -6,6 +6,9 @@
 #include "config.h"
 #include "SmallFont.h"
 #include "Settings.h"
+#include "Leaderboard.h"
+#include "UserProfiles.h"
+#include "GameOverLeaderboardView.h"
 
 // Game canvas configuration: reserve top space for HUD
 static const int HUD_HEIGHT = 8;  // Space reserved at top for score/player info
@@ -452,8 +455,13 @@ public:
         display->fillScreen(COLOR_BLACK);
 
         if (gameOver) {
-            // Use small font for game over text
-            SmallFont::drawString(display, 8, 28, "GAME OVER", COLOR_RED);
+            // -----------------------------------------------------
+            // GAME OVER + per-game leaderboard view
+            // -----------------------------------------------------
+            const uint32_t score = leaderboardScore();
+            char tag[4];
+            UserProfiles::getPadTag(0, tag);
+            GameOverLeaderboardView::draw(display, "GAME OVER", leaderboardId(), score, tag);
             return;
         }
 

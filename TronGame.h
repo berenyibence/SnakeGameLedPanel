@@ -6,6 +6,8 @@
 #include "config.h"
 #include "SmallFont.h"
 #include "Settings.h"
+#include "UserProfiles.h"
+#include "GameOverLeaderboardView.h"
 
 /**
  * TronGame - Classic Tron / Light-Cycles
@@ -444,20 +446,13 @@ public:
 
         // GAME OVER screen
         if (gameOver) {
-            if (winnerPad >= 0) {
-                SmallFont::drawStringF(display, 8, 26, COLOR_RED, "P%d WINS!", winnerPad + 1);
-            } else {
-                SmallFont::drawString(display, 10, 26, "GAME OVER", COLOR_RED);
-            }
+            char title[12];
+            if (winnerPad >= 0) snprintf(title, sizeof(title), "P%d WINS", winnerPad + 1);
+            else snprintf(title, sizeof(title), "GAME OVER");
 
-            // Scores
-            int x = 6;
-            int y = 38;
-            for (int i = 0; i < MAX_GAMEPADS; i++) {
-                if (!players[i].active) continue;
-                SmallFont::drawStringF(display, x, y, players[i].color, "P%d:%d", i + 1, players[i].score);
-                x += 16;
-            }
+            char tag[4];
+            UserProfiles::getPadTag(0, tag);
+            GameOverLeaderboardView::draw(display, title, leaderboardId(), leaderboardScore(), tag);
             return;
         }
 

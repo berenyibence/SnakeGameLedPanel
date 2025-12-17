@@ -7,6 +7,8 @@
 #include "config.h"
 #include "SmallFont.h"
 #include "Settings.h"
+#include "UserProfiles.h"
+#include "GameOverLeaderboardView.h"
 
 /**
  * PongGame - Classic Pong game implementation
@@ -312,16 +314,14 @@ public:
         display->fillScreen(COLOR_BLACK);
         
         if (gameOver) {
-            // Show winner with small font
-            if (leftPaddle.score >= 5) {
-                SmallFont::drawString(display, 10, 25, twoPlayer ? "P1 WINS!" : "YOU WIN!", COLOR_RED);
-            } else {
-                SmallFont::drawString(display, 10, 25, twoPlayer ? "P2 WINS!" : "CPU WINS!", COLOR_RED);
-            }
-            
-            char scoreStr[16];
-            snprintf(scoreStr, sizeof(scoreStr), twoPlayer ? "P1:%d P2:%d" : "P1:%d CPU:%d", leftPaddle.score, rightPaddle.score);
-            SmallFont::drawString(display, 4, 35, scoreStr, COLOR_WHITE);
+            // Standard leaderboard game-over view.
+            char title[12];
+            if (leftPaddle.score >= 5) snprintf(title, sizeof(title), twoPlayer ? "P1 WINS" : "YOU WIN");
+            else snprintf(title, sizeof(title), twoPlayer ? "P2 WINS" : "CPU WINS");
+
+            char tag[4];
+            UserProfiles::getPadTag(0, tag);
+            GameOverLeaderboardView::draw(display, title, leaderboardId(), leaderboardScore(), tag);
             return;
         }
 

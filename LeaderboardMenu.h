@@ -97,7 +97,8 @@ private:
     // Scores list (for selected game)
     // -----------------------
     ScrollableList scoresList;
-    char scoreLabels[Leaderboard::TOP_SCORES][16] = {};
+    // Needs to fit: "5 ABC 4294967295" + NUL = 1+1+3+1+10 +1 = 17 (plus safety).
+    char scoreLabels[Leaderboard::TOP_SCORES][24] = {};
 
     class ScoresModel : public ListModel {
     public:
@@ -145,7 +146,7 @@ private:
         }
 
         // Show selected game name in HUD area as "L: name".
-        char hud[16];
+        char hud[24];
         snprintf(hud, sizeof(hud), "L:%s", e->name);
         SmallFont::drawString(display, 2, 6, hud, COLOR_YELLOW);
 

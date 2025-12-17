@@ -6,6 +6,8 @@
 #include "config.h"
 #include "SmallFont.h"
 #include "Settings.h"
+#include "UserProfiles.h"
+#include "GameOverLeaderboardView.h"
 
 /**
  * ShooterGame - Space shooter game
@@ -338,10 +340,9 @@ public:
         for (int x = 0; x < PANEL_RES_X; x += 2) display->drawPixel(x, HUD_H - 1, COLOR_BLUE);
         
         if (phase == PHASE_GAME_OVER || gameOver) {
-            SmallFont::drawString(display, 8, 28, "GAME OVER", COLOR_RED);
-            char scoreStr[16];
-            snprintf(scoreStr, sizeof(scoreStr), "SCORE:%d", score);
-            SmallFont::drawString(display, 4, 38, scoreStr, COLOR_WHITE);
+            char tag[4];
+            UserProfiles::getPadTag(0, tag);
+            GameOverLeaderboardView::draw(display, "GAME OVER", leaderboardId(), leaderboardScore(), tag);
             return;
         }
 

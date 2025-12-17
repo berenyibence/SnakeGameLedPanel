@@ -6,6 +6,8 @@
 #include "config.h"
 #include "SmallFont.h"
 #include "Settings.h"
+#include "UserProfiles.h"
+#include "GameOverLeaderboardView.h"
 
 /**
  * LabyrinthGame - Maze navigation game
@@ -610,16 +612,10 @@ public:
     void draw(MatrixPanel_I2S_DMA* display) override {
         display->fillScreen(COLOR_BLACK);
         
-        if (gameWon) {
-            SmallFont::drawString(display, 8, 28, "LEVEL COMPLETE!", COLOR_GREEN);
-            char levelStr[16];
-            snprintf(levelStr, sizeof(levelStr), "LEVEL: %d", level);
-            SmallFont::drawString(display, 8, 38, levelStr, COLOR_WHITE);
-            return;
-        }
-        
-        if (gameOver) {
-            SmallFont::drawString(display, 8, 28, "GAME OVER", COLOR_RED);
+        if (gameWon || gameOver) {
+            char tag[4];
+            UserProfiles::getPadTag(0, tag);
+            GameOverLeaderboardView::draw(display, gameWon ? "YOU WIN" : "GAME OVER", leaderboardId(), leaderboardScore(), tag);
             return;
         }
         

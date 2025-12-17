@@ -5,6 +5,8 @@
 #include "ControllerManager.h"
 #include "config.h"
 #include "SmallFont.h"
+#include "UserProfiles.h"
+#include "GameOverLeaderboardView.h"
 
 /**
  * TetrisGame - Classic Tetris game
@@ -386,10 +388,9 @@ public:
         display->fillScreen(COLOR_BLACK);
         
         if (gameOver) {
-            SmallFont::drawString(display, 8, 28, "GAME OVER", COLOR_RED);
-            char scoreStr[16];
-            snprintf(scoreStr, sizeof(scoreStr), "SCORE:%d", score);
-            SmallFont::drawString(display, 4, 38, scoreStr, COLOR_WHITE);
+            char tag[4];
+            UserProfiles::getPadTag(0, tag);
+            GameOverLeaderboardView::draw(display, "GAME OVER", leaderboardId(), leaderboardScore(), tag);
             return;
         }
 

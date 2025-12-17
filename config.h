@@ -65,3 +65,9 @@
 #define COLOR_YELLOW  0xFFE0
 #define COLOR_ORANGE  0xFD20
 #define COLOR_PURPLE  0x780F
+
+// =======================================================
+// Debug toggles
+// =======================================================
+// Set to 1 to enable verbose serial logs for leaderboard/EEPROM flows.
+#define DEBUG_LEADERBOARD 0

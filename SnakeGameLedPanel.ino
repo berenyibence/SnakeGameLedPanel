@@ -41,6 +41,9 @@ SettingsMenu settingsMenu;
 LeaderboardMenu leaderboardMenu;
 UserSelectMenu userSelectMenu;
 GameBase* currentGame = nullptr;
+// Monotonic game-run token to avoid relying on pointer addresses (which can be reused).
+// Incremented each time we start a NEW game instance from the menu.
+uint32_t currentGameRunId = 0;
 
 // ---------------------------------------------------------
 // Frame pacing / presentation helpers
@@ -66,6 +69,33 @@ static inline bool shouldRenderNow(uint32_t nowMs, uint32_t& lastRenderMs, uint3
     return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------
+// Controller helpers (Bluepad32 API surface varies by version/controller)
+// ---------------------------------------------------------
+// We intentionally use SFINAE to check for different APIs without hard-binding.
+struct ExitButton {
+  template <typename T>
+  static auto miscButtons(T* c, int) -> decltype(c->miscButtons(), uint16_t()) { return (uint16_t)c->miscButtons(); }
+  template <typename T>
+  static uint16_t miscButtons(T*, ...) { return 0; }
+
+  template <typename T>
+  static auto start(T* c, int) -> decltype(c->start(), bool()) { return (bool)c->start(); }
+  template <typename T>
+  static bool start(T*, ...) { return false; }
+};
+
+static inline bool isStartPressed(ControllerPtr ctl) {
+  if (!ctl) return false;
+  // Prefer a dedicated start() accessor if present.
+  if (ExitButton::start(ctl, 0)) return true;
+
+  // Otherwise fall back to miscButtons() bitmask (common in Bluepad32).
+  // Convention in Bluepad32: START is typically bit 0x04 in miscButtons().
+  const uint16_t misc = ExitButton::miscButtons(ctl, 0);
+  return (misc & 0x04) != 0;
 }
 
 // ---------------------------------------------------------
@@ -331,6 +361,8 @@ void loop() {
             
             if (currentGame != nullptr) {
               currentGame->start();
+              // New game run started. Increment token (never rely on pointer equality).
+              currentGameRunId++;
               currentState = STATE_GAME_RUNNING;
               forceGameRender = true;
             }
@@ -413,34 +445,57 @@ void loop() {
         currentState = STATE_NO_CONTROLLER;
       } else {
         if (currentGame) {
+          // Update per-game render pacing (some games prefer lower FPS).
+          gameIntervalMs = fpsToIntervalMs(currentGame->preferredRenderFps());
+
+          // 1. Update Physics/Logic
+          currentGame->update(globalControllerManager);
+
           // -----------------------------------------------------
           // Auto-submit score to leaderboard once per game run
+          // (IMPORTANT: do this AFTER update(), so a game-over set during update()
+          // is recorded before the first GAME OVER render)
           // -----------------------------------------------------
-          static GameBase* lastGamePtr = nullptr;
+          static uint32_t submittedRunId = 0;
           static bool submitted = false;
-          if (currentGame != lastGamePtr) {
-            lastGamePtr = currentGame;
+          if (submittedRunId != currentGameRunId) {
+            submittedRunId = currentGameRunId;
             submitted = false;
           }
           if (!submitted && currentGame->isGameOver()) {
             // Only submit for games that opt in (see GameBase leaderboard methods).
             // NOTE: leaderboard methods are optional with safe defaults.
             if (currentGame->leaderboardEnabled()) {
+              #if DEBUG_LEADERBOARD
+              Serial.print(F("[Engine] Game over detected, submitting score: gameId="));
+              Serial.print(currentGame->leaderboardId());
+              Serial.print(F(" gameName="));
+              Serial.print(currentGame->leaderboardName());
+              Serial.print(F(" score="));
+              Serial.println(currentGame->leaderboardScore());
+              #endif
+              
               char tag[4];
               UserProfiles::getPadTag(0, tag);
+              #if DEBUG_LEADERBOARD
+              Serial.print(F("[Engine] Player tag: "));
+              Serial.println(tag);
+              #endif
+              
               Leaderboard::submitScore(currentGame->leaderboardId(),
                                        currentGame->leaderboardName(),
                                        currentGame->leaderboardScore(),
                                        tag);
+              #if DEBUG_LEADERBOARD
+              Serial.println(F("[Engine] submitScore() call completed"));
+              #endif
+            } else {
+              #if DEBUG_LEADERBOARD
+              Serial.println(F("[Engine] Game over but leaderboard not enabled for this game"));
+              #endif
             }
             submitted = true;
           }
-
-          // Update per-game render pacing (some games prefer lower FPS).
-          gameIntervalMs = fpsToIntervalMs(currentGame->preferredRenderFps());
-
-          // 1. Update Physics/Logic
-          currentGame->update(globalControllerManager);
 
           // 2. Render Frame (capped FPS to reduce tearing/scanline artifacts)
           if (shouldRenderNow(nowMs, lastGameRenderMs, gameIntervalMs, forceGameRender)) {
@@ -449,13 +504,13 @@ void loop() {
           }
 
           ControllerPtr p1 = globalControllerManager->getController(0);
-          if (p1 && p1->b()) {
+          if (isStartPressed(p1)) {
             delete currentGame;
             currentGame = nullptr;
             currentState = STATE_MENU;
             dma_display->clearScreen();
             forceMenuRender = true;
-            delay(300);  // Debounce 'B' press
+            delay(300);  // Debounce START press
           }
         }
       }

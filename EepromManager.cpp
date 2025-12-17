@@ -32,9 +32,16 @@ bool commit() {
     return false;
   }
 
+  const uint32_t t0 = millis();
+  Serial.println(F("[EEPROM] commit() start"));
+  delay(0);
   const bool ok = EEPROM.commit();
+  delay(0);
+  const uint32_t dt = (uint32_t)(millis() - t0);
   if (!ok) Serial.println(F("[EEPROM] ERROR: commit() failed!"));
   else Serial.println(F("[EEPROM] commit() successful"));
+  Serial.print(F("[EEPROM] commit() dtMs="));
+  Serial.println(dt);
   return ok;
 }
 

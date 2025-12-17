@@ -8,6 +8,8 @@
 #include "config.h"
 #include "SmallFont.h"
 #include "Settings.h"
+#include "UserProfiles.h"
+#include "GameOverLeaderboardView.h"
 
 /**
  * AsteroidsGame - Classic Asteroids-inspired gameplay adapted for a 64x64 HUB75 panel.
@@ -452,8 +454,9 @@ public:
         for (int x = 0; x < PANEL_RES_X; x += 2) display->drawPixel(x, HUD_H, COLOR_BLUE);
 
         if (gameOver) {
-            SmallFont::drawString(display, 10, 28, "GAME OVER", COLOR_RED);
-            SmallFont::drawStringF(display, 10, 38, COLOR_WHITE, "SCORE:%d", score);
+            char tag[4];
+            UserProfiles::getPadTag(0, tag);
+            GameOverLeaderboardView::draw(display, "GAME OVER", leaderboardId(), leaderboardScore(), tag);
             return;
         }
 

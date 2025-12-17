@@ -6,6 +6,8 @@
 #include "config.h"
 #include "SmallFont.h"
 #include "Settings.h"
+#include "UserProfiles.h"
+#include "GameOverLeaderboardView.h"
 
 /**
  * BreakoutGame - Classic Breakout/Arkanoid style game
@@ -282,19 +284,12 @@ public:
     void draw(MatrixPanel_I2S_DMA* display) override {
         display->fillScreen(COLOR_BLACK);
         
-        if (gameOver) {
-            SmallFont::drawString(display, 8, 28, "GAME OVER", COLOR_RED);
-            char scoreStr[16];
-            snprintf(scoreStr, sizeof(scoreStr), "SCORE:%d", score);
-            SmallFont::drawString(display, 4, 38, scoreStr, COLOR_WHITE);
-            return;
-        }
-        
-        if (gameWon) {
-            SmallFont::drawString(display, 12, 28, "YOU WIN!", COLOR_GREEN);
-            char scoreStr[16];
-            snprintf(scoreStr, sizeof(scoreStr), "SCORE:%d", score);
-            SmallFont::drawString(display, 4, 38, scoreStr, COLOR_WHITE);
+        if (gameOver || gameWon) {
+            // Standard game-over screen: show Top-5 leaderboard for this game.
+            const uint32_t s = leaderboardScore();
+            char tag[4];
+            UserProfiles::getPadTag(0, tag);
+            GameOverLeaderboardView::draw(display, gameWon ? "YOU WIN" : "GAME OVER", leaderboardId(), s, tag);
             return;
         }
 
