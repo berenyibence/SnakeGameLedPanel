@@ -140,10 +140,10 @@ private:
 
     void drawEditor(MatrixPanel_I2S_DMA* display) {
         // Show hint
-        SmallFont::drawString(display, 2, HUD_H + 10, "SET TAG", COLOR_WHITE);
-        SmallFont::drawString(display, 2, HUD_H + 20, "LR:MOVE", COLOR_WHITE);
-        SmallFont::drawString(display, 2, HUD_H + 30, "UD:CHAR", COLOR_WHITE);
-        SmallFont::drawString(display, 2, HUD_H + 40, "A:OK B:CANCEL", COLOR_WHITE);
+        //SmallFont::drawString(display, 2, HUD_H + 10, "SET TAG", COLOR_WHITE);
+        //SmallFont::drawString(display, 2, HUD_H + 20, "LR:MOVE", COLOR_WHITE);
+        //SmallFont::drawString(display, 2, HUD_H + 30, "UD:CHAR", COLOR_WHITE);
+        //SmallFont::drawString(display, 2, HUD_H + 40, "A:OK B:CANCEL", COLOR_WHITE);
 
         // Draw the three characters, highlighting the active cursor.
         const int baseX = 20;
