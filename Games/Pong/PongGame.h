@@ -2,13 +2,14 @@
 #include <Arduino.h>
 #include <math.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include "GameBase.h"
-#include "ControllerManager.h"
-#include "config.h"
-#include "SmallFont.h"
-#include "Settings.h"
-#include "UserProfiles.h"
-#include "GameOverLeaderboardView.h"
+#include "../../GameBase.h"
+#include "../../ControllerManager.h"
+#include "../../config.h"
+#include "../../SmallFont.h"
+#include "../../Settings.h"
+#include "../../UserProfiles.h"
+#include "../../GameOverLeaderboardView.h"
+#include "PongGameConfig.h"
 
 /**
  * PongGame - Classic Pong game implementation
@@ -64,23 +65,21 @@ private:
     bool gameOver;
     bool twoPlayer;
     unsigned long lastUpdate;
-    static const int UPDATE_INTERVAL_MS = 16;  // ~60 FPS
+    static constexpr int UPDATE_INTERVAL_MS = PongGameConfig::UPDATE_INTERVAL_MS;  // ~60 FPS
 
     // Gameplay tuning
-    static constexpr int BALL_SIZE_PX = 2;            // drawn size (minimum 2x2 as requested)
-    static constexpr float BALL_HALF = 1.0f;          // half-size for collision checks (center-based)
-    // NOTE (Arduino/ESP32 toolchain): avoid `static constexpr float` class members that can
-    // require out-of-class definitions and cause linker errors. Use inline getters instead.
-    static inline float ballStartSpeed() { return 0.95f; } // slower start speed
-    static inline float ballMaxSpeed() { return 1.35f; }   // cap to keep it playable on 64x64
-    static constexpr float PLAYER_SPEED = 2.4f;       // px per tick at full stick
-    static constexpr float STICK_DEADZONE = 0.18f;    // 0..1
-    static constexpr int16_t AXIS_DIVISOR = 512;      // Bluepad32 commonly ~[-512..512]
+    static constexpr int BALL_SIZE_PX = PongGameConfig::BALL_SIZE_PX;            // drawn size (minimum 2x2 as requested)
+    static constexpr float BALL_HALF = PongGameConfig::BALL_HALF;                // half-size for collision checks (center-based)
+    static inline float ballStartSpeed() { return PongGameConfig::ballStartSpeed(); } // slower start speed
+    static inline float ballMaxSpeed() { return PongGameConfig::ballMaxSpeed(); }     // cap to keep it playable on 64x64
+    static constexpr float PLAYER_SPEED = PongGameConfig::PLAYER_SPEED;          // px per tick at full stick
+    static constexpr float STICK_DEADZONE = PongGameConfig::STICK_DEADZONE;      // 0..1
+    static constexpr int16_t AXIS_DIVISOR = PongGameConfig::AXIS_DIVISOR;        // Bluepad32 commonly ~[-512..512]
 
     // CPU difficulty (intentionally beatable)
-    static constexpr uint16_t AI_THINK_MS = 70;       // reaction delay
-    static constexpr float AI_SPEED = 1.4f;           // slower than player
-    static constexpr int AI_ERROR_PX = 7;             // aim error range (+/-)
+    static constexpr uint16_t AI_THINK_MS = PongGameConfig::AI_THINK_MS;         // reaction delay
+    static constexpr float AI_SPEED = PongGameConfig::AI_SPEED;                  // slower than player
+    static constexpr int AI_ERROR_PX = PongGameConfig::AI_ERROR_PX;              // aim error range (+/-)
     uint32_t lastAiThinkMs = 0;
     float aiAimY = 32.0f;
 
@@ -89,8 +88,8 @@ private:
     RoundPhase phase = PHASE_COUNTDOWN;
     uint32_t phaseStartMs = 0;
     uint8_t lastPointWinner = 0; // 0=left, 1=right
-    static constexpr uint16_t POINT_FLASH_MS = 450;
-    static constexpr uint16_t COUNTDOWN_MS = 3000;
+    static constexpr uint16_t POINT_FLASH_MS = PongGameConfig::POINT_FLASH_MS;
+    static constexpr uint16_t COUNTDOWN_MS = PongGameConfig::COUNTDOWN_MS;
     
     /**
      * Reset ball to center with random direction

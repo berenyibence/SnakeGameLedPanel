@@ -12,15 +12,14 @@
 #include "config.h"
 #include "DisplayPresent.h"
 #include "ControllerManager.h"
-#include "SnakeGame.h"
-#include "TronGame.h"
-#include "PongGame.h"
-#include "BreakoutGame.h"
-#include "ShooterGame.h"
-#include "LabyrinthGame.h"
-#include "TetrisGame.h"
-#include "EmojisGame.h"
-#include "AsteroidsGame.h"
+#include "Games/Snake/SnakeGame.h"
+#include "Games/Tron/TronGame.h"
+#include "Games/Pong/PongGame.h"
+#include "Games/Breakout/BreakoutGame.h"
+#include "Games/Shooter/ShooterGame.h"
+#include "Games/Labyrinth/LabyrinthGame.h"
+#include "Games/Tetris/TetrisGame.h"
+#include "Games/Asteroids/AsteroidsGame.h"
 #include "Menu.h"
 #include "EepromManager.h"
 #include "Settings.h"
@@ -346,10 +345,7 @@ void loop() {
                   currentGame = new TetrisGame();
                 }
                 break;
-              case 7:  // Emojis
-                currentGame = new EmojisGame();
-                break;
-              case 8:  // Asteroids (only visible with 1 player)
+              case 7:  // Asteroids (only visible with 1 player)
                 if (players == 1) {
                   currentGame = new AsteroidsGame();
                 }

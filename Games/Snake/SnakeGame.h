@@ -1,57 +1,38 @@
 #pragma once
 #include <Arduino.h>
 #include <math.h>
-#include <vector>
-#include "GameBase.h"
-#include "config.h"
-#include "SmallFont.h"
-#include "Settings.h"
-#include "Leaderboard.h"
-#include "UserProfiles.h"
-#include "GameOverLeaderboardView.h"
+#include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
+#include "../../GameBase.h"
+#include "../../ControllerManager.h"
+#include "../../config.h"
+#include "../../SmallFont.h"
+#include "../../Settings.h"
+#include "../../UserProfiles.h"
+#include "../../GameOverLeaderboardView.h"
+#include "SnakeGameConfig.h"
 
-// Game canvas configuration: reserve top space for HUD
-static const int HUD_HEIGHT = 8;  // Space reserved at top for score/player info
-static const int PIXEL_SIZE = 2;  // Render size for snake/body/food (2x2 pixels per logical cell)
+// Local aliases for readability (these are all tweakable in SnakeGameConfig.h)
+static constexpr int HUD_HEIGHT = SnakeGameConfig::HUD_HEIGHT;
+static constexpr int PIXEL_SIZE = SnakeGameConfig::PIXEL_SIZE;
 
-// =========================================================
-// Playfield layout (Snake)
-// =========================================================
-// To avoid edge-pixel artifacts on some HUB75 panels, we keep Snake's entire
-// playfield (border + all sprites) *inset by 1 pixel* from the physical panel
-// edges (left/right/bottom). We also keep a 1px gap below the HUD.
-//
-// Visually:
-// - y: [0..HUD_HEIGHT-1]  -> HUD area
-// - y: HUD_HEIGHT         -> 1px spacer line
-// - y: HUD_HEIGHT+1..62   -> playfield border + content
-// - y: 63                 -> unused (edge pixel)
-static const int PLAYFIELD_BORDER_INSET_X = 1;   // leaves x=0 unused, border starts at x=1
-static const int PLAYFIELD_BORDER_INSET_Y = 1;   // leaves a 1px gap below HUD
-static const int PLAYFIELD_BORDER_INSET_BOTTOM = 1; // leaves y=63 unused
+static constexpr int PLAYFIELD_BORDER_X = SnakeGameConfig::PLAYFIELD_BORDER_X;
+static constexpr int PLAYFIELD_BORDER_Y = SnakeGameConfig::PLAYFIELD_BORDER_Y;
+static constexpr int PLAYFIELD_BORDER_W = SnakeGameConfig::PLAYFIELD_BORDER_W;
+static constexpr int PLAYFIELD_BORDER_H = SnakeGameConfig::PLAYFIELD_BORDER_H;
 
-// Border rectangle (in pixels)
-static const int PLAYFIELD_BORDER_X = PLAYFIELD_BORDER_INSET_X;
-static const int PLAYFIELD_BORDER_Y = HUD_HEIGHT + PLAYFIELD_BORDER_INSET_Y;
-static const int PLAYFIELD_BORDER_W = PANEL_RES_X - (PLAYFIELD_BORDER_INSET_X * 2);
-static const int PLAYFIELD_BORDER_H = (PANEL_RES_Y - PLAYFIELD_BORDER_Y) - PLAYFIELD_BORDER_INSET_BOTTOM;
+static constexpr int PLAYFIELD_CONTENT_X = SnakeGameConfig::PLAYFIELD_CONTENT_X;
+static constexpr int PLAYFIELD_CONTENT_Y = SnakeGameConfig::PLAYFIELD_CONTENT_Y;
+static constexpr int PLAYFIELD_CONTENT_W = SnakeGameConfig::PLAYFIELD_CONTENT_W;
+static constexpr int PLAYFIELD_CONTENT_H = SnakeGameConfig::PLAYFIELD_CONTENT_H;
 
-// Content area is inside the border (1px thickness)
-static const int PLAYFIELD_CONTENT_X = PLAYFIELD_BORDER_X + 1;
-static const int PLAYFIELD_CONTENT_Y = PLAYFIELD_BORDER_Y + 1;
-static const int PLAYFIELD_CONTENT_W = PLAYFIELD_BORDER_W - 2;
-static const int PLAYFIELD_CONTENT_H = PLAYFIELD_BORDER_H - 2;
-
-// Logical game grid dimensions (in game cells, not pixels)
-// NOTE: Must evenly divide by PIXEL_SIZE.
-#define LOGICAL_WIDTH  (PLAYFIELD_CONTENT_W / PIXEL_SIZE)
-#define LOGICAL_HEIGHT (PLAYFIELD_CONTENT_H / PIXEL_SIZE)
+static constexpr int LOGICAL_WIDTH = SnakeGameConfig::LOGICAL_WIDTH;
+static constexpr int LOGICAL_HEIGHT = SnakeGameConfig::LOGICAL_HEIGHT;
 
 enum Direction { UP, DOWN, LEFT, RIGHT, NONE };
 
 struct Point {
-    int x;
-    int y;
+    int16_t x;
+    int16_t y;
 };
 
 // Food/creature types for Nokia Snake 2 style sprites (but keep our project palette).
@@ -76,10 +57,65 @@ struct FoodItem {
 
 class Snake {
 public:
-    std::vector<Point> body;
+    // Fixed-size ring buffer body (no heap allocations).
+    struct BodyRing {
+        static constexpr uint16_t MAX_LEN = SnakeGameConfig::MAX_SNAKE_LEN;
+        Point seg[MAX_LEN];
+        uint16_t headIdx = 0; // index of head segment
+        uint16_t len = 0;     // number of segments (0..MAX_LEN)
+
+        void clear() {
+            headIdx = 0;
+            len = 0;
+        }
+
+        uint16_t size() const { return len; }
+        bool empty() const { return len == 0; }
+
+        const Point& head() const { return seg[headIdx]; }
+
+        const Point& at(uint16_t i /*0=head*/) const {
+            // Body order is: head, then next segments "behind" it.
+            // Segment i lives at (headIdx - i) in ring space.
+            const uint16_t idx = (uint16_t)((headIdx + MAX_LEN - (i % MAX_LEN)) % MAX_LEN);
+            return seg[idx];
+        }
+
+        const Point& tail() const {
+            return at((uint16_t)(len - 1));
+        }
+
+        // Add a new head segment (O(1)).
+        void pushHead(const Point& p) {
+            headIdx = (uint16_t)((headIdx + 1) % MAX_LEN);
+            seg[headIdx] = p;
+            if (len < MAX_LEN) {
+                len++;
+            } else {
+                // Should never happen in normal play (can't exceed grid cells),
+                // but if it does, we intentionally overwrite the tail.
+            }
+        }
+
+        // Append a tail segment (used for initialization).
+        void appendTail(const Point& p) {
+            if (len >= MAX_LEN) return;
+            // Tail index is (headIdx - (len)) before incrementing len.
+            const uint16_t idx = (uint16_t)((headIdx + MAX_LEN - len) % MAX_LEN);
+            seg[idx] = p;
+            len++;
+        }
+
+        void popTail() {
+            if (len > 0) len--;
+        }
+    };
+
+    BodyRing body;
     Direction dir;
     Direction nextDir;
     uint16_t color;
+    bool enabled;
     bool alive;
     bool dying;
     uint32_t deathStartMs;
@@ -90,16 +126,46 @@ public:
     // bulgeIndex is the segment index in `body` (0=head). -1 means no bulge active.
     int bulgeIndex;
 
-    Snake(int idx, int x, int y, uint16_t c) {
+    Snake() :
+        dir(NONE),
+        nextDir(NONE),
+        color(COLOR_GREEN),
+        enabled(false),
+        alive(false),
+        dying(false),
+        deathStartMs(0),
+        score(0),
+        playerIndex(-1),
+        bulgeIndex(-1) {
+        body.clear();
+    }
+
+    void init(int idx, int x, int y, uint16_t c) {
         playerIndex = idx;
         color = c;
+        enabled = true;
         reset(x, y);
+    }
+
+    void disable() {
+        enabled = false;
+        alive = false;
+        dying = false;
+        deathStartMs = 0;
+        score = 0;
+        bulgeIndex = -1;
+        body.clear();
+        dir = NONE;
+        nextDir = NONE;
     }
 
     void reset(int x, int y) {
         body.clear();
-        body.push_back({x, y});
-        body.push_back({x, y + 1});
+        // Initialize as a 2-segment snake: head + 1 tail segment behind it.
+        body.seg[0] = { (int16_t)x, (int16_t)y };
+        body.headIdx = 0;
+        body.len = 1;
+        body.appendTail({ (int16_t)x, (int16_t)(y + 1) });
         dir = UP;
         nextDir = UP;
         alive = true;
@@ -169,7 +235,7 @@ public:
         if (!alive || dir == NONE) return;
 
         dir = nextDir;
-        Point head = body.front();
+        Point head = body.head();
 
         if (dir == UP) head.y--;
         else if (dir == DOWN) head.y++;
@@ -177,20 +243,22 @@ public:
         else if (dir == RIGHT) head.x++;
 
         // Edge detection with wrap-around (updated for new game area)
-        if (head.x < 0) head.x = LOGICAL_WIDTH - 1;
+        if (head.x < 0) head.x = (int16_t)(LOGICAL_WIDTH - 1);
         else if (head.x >= LOGICAL_WIDTH) head.x = 0;
-        if (head.y < 0) head.y = LOGICAL_HEIGHT - 1;
+        if (head.y < 0) head.y = (int16_t)(LOGICAL_HEIGHT - 1);
         else if (head.y >= LOGICAL_HEIGHT) head.y = 0;
 
-        body.insert(body.begin(), head);
-        if (!grow) body.pop_back();
+        body.pushHead(head);
+        if (!grow) body.popTail();
     }
 };
 
 class SnakeGame : public GameBase {
 private:
-    std::vector<Snake> snakes;
-    std::vector<FoodItem> foods;
+    Snake snakes[SnakeGameConfig::MAX_SNAKES];
+    FoodItem foods[SnakeGameConfig::MAX_FOODS];
+    uint8_t foodCount = 0;
+    uint8_t playerCountAtStart = 0;
     unsigned long lastMove;
     bool gameOver;
 
@@ -198,10 +266,9 @@ private:
     enum Phase : uint8_t { PHASE_COUNTDOWN, PHASE_PLAYING, PHASE_GAME_OVER };
     Phase phase;
     uint32_t phaseStartMs;
-    static constexpr uint16_t COUNTDOWN_MS = 3000;
-
-    static constexpr uint16_t DEATH_BLINK_TOTAL_MS = 900;
-    static constexpr uint16_t DEATH_BLINK_PERIOD_MS = 120;
+    static constexpr uint16_t COUNTDOWN_MS = SnakeGameConfig::COUNTDOWN_MS;
+    static constexpr uint16_t DEATH_BLINK_TOTAL_MS = SnakeGameConfig::DEATH_BLINK_TOTAL_MS;
+    static constexpr uint16_t DEATH_BLINK_PERIOD_MS = SnakeGameConfig::DEATH_BLINK_PERIOD_MS;
 
     uint16_t playerColors[4] = {
         COLOR_GREEN, COLOR_CYAN, COLOR_ORANGE, COLOR_PURPLE
@@ -222,17 +289,22 @@ private:
     static inline uint32_t ttlForFoodMs(FoodKind k) {
         // Creatures expire; apples don't.
         if (k == FOOD_APPLE) return 0UL;
-        return 9000UL;
+        return SnakeGameConfig::CREATURE_TTL_MS;
     }
 
     static inline FoodKind chooseNextFoodKind() {
         // Weighted: mostly apples, occasional creatures.
         const int r = random(0, 100);
-        if (r < 68) return FOOD_APPLE;
-        if (r < 78) return FOOD_MOUSE;
-        if (r < 86) return FOOD_FROG;
-        if (r < 92) return FOOD_BIRD;
-        if (r < 97) return FOOD_FISH;
+        const int t0 = SnakeGameConfig::FOOD_WEIGHT_APPLE;
+        const int t1 = t0 + SnakeGameConfig::FOOD_WEIGHT_MOUSE;
+        const int t2 = t1 + SnakeGameConfig::FOOD_WEIGHT_FROG;
+        const int t3 = t2 + SnakeGameConfig::FOOD_WEIGHT_BIRD;
+        const int t4 = t3 + SnakeGameConfig::FOOD_WEIGHT_FISH;
+        if (r < t0) return FOOD_APPLE;
+        if (r < t1) return FOOD_MOUSE;
+        if (r < t2) return FOOD_FROG;
+        if (r < t3) return FOOD_BIRD;
+        if (r < t4) return FOOD_FISH;
         return FOOD_BUG;
     }
 
@@ -279,21 +351,24 @@ private:
             f.hCells = h;
 
             // Keep within bounds for a multi-cell hitbox.
-            f.p.x = random(0, max(1, LOGICAL_WIDTH - (int)w));
-            f.p.y = random(0, max(1, LOGICAL_HEIGHT - (int)h));
+            f.p.x = (int16_t)random(0, max(1, LOGICAL_WIDTH - (int)w));
+            f.p.y = (int16_t)random(0, max(1, LOGICAL_HEIGHT - (int)h));
             f.kind = kind;
             const uint32_t ttl = ttlForFoodMs(kind);
             f.expireMs = (ttl == 0) ? 0 : (millis() + ttl);
 
-            for (auto& s : snakes) {
-                for (auto& p : s.body) {
-                    if (pointInFood(f, p)) {
-                        ok = false;
-                        break;
-                    }
+            for (uint8_t si = 0; si < SnakeGameConfig::MAX_SNAKES; si++) {
+                Snake& s = snakes[si];
+                if (!s.enabled) continue;
+                for (uint16_t bi = 0; bi < s.body.size(); bi++) {
+                    const Point& p = s.body.at(bi);
+                    if (pointInFood(f, p)) { ok = false; break; }
                 }
+                if (!ok) break;
             }
-            for (auto& existing : foods) {
+
+            for (uint8_t ei = 0; ei < foodCount; ei++) {
+                const FoodItem& existing = foods[ei];
                 // Overlap test.
                 for (int yy = 0; yy < (int)f.hCells; yy++) {
                     for (int xx = 0; xx < (int)f.wCells; xx++) {
@@ -305,7 +380,13 @@ private:
                 if (!ok) break;
             }
         } while (!ok);
-        foods.push_back(f);
+
+        if (foodCount < SnakeGameConfig::MAX_FOODS) {
+            foods[foodCount++] = f;
+        } else {
+            // Shouldn't happen because we keep foodCount capped, but guard anyway.
+            foods[random(0, (int)SnakeGameConfig::MAX_FOODS)] = f;
+        }
     }
 
 public:
@@ -314,29 +395,34 @@ public:
         gameOver = false;
         phase = PHASE_COUNTDOWN;
         phaseStartMs = 0;
+        foodCount = 0;
+        playerCountAtStart = 0;
+        for (uint8_t i = 0; i < SnakeGameConfig::MAX_SNAKES; i++) snakes[i].disable();
     }
 
     /**
-     * Snake updates at a fixed tick rate (SNAKE_SPEED_MS).
+     * Snake updates at a fixed tick rate (`SnakeGameConfig::MOVE_TICK_MS`).
      * Rendering faster than that doesn't improve gameplay, but it *does*
      * increase display bandwidth and can surface HUB75 ghosting artifacts on
      * some panels (especially with lots of black background).
      */
     uint16_t preferredRenderFps() const override {
-        if (SNAKE_SPEED_MS == 0) return GAME_RENDER_FPS;
-        uint16_t fps = (uint16_t)(1000UL / (uint32_t)SNAKE_SPEED_MS);
+        if (SnakeGameConfig::MOVE_TICK_MS == 0) return GAME_RENDER_FPS;
+        uint16_t fps = (uint16_t)(1000UL / (uint32_t)SnakeGameConfig::MOVE_TICK_MS);
         if (fps < 10) fps = 10; // keep UI responsive / flashing visible
         if (fps > GAME_RENDER_FPS) fps = GAME_RENDER_FPS;
         return fps;
     }
 
     void start() override {
-        snakes.clear();
         gameOver = false;
         phase = PHASE_COUNTDOWN;
         phaseStartMs = millis();
         lastMove = phaseStartMs;
-        foods.clear();
+        foodCount = 0;
+        playerCountAtStart = 0;
+
+        for (uint8_t i = 0; i < SnakeGameConfig::MAX_SNAKES; i++) snakes[i].disable();
 
         // Apply current global player color for Player 1 (pad index 0).
         // This allows changing the color in the main menu and having it reflect here.
@@ -345,17 +431,18 @@ public:
         // Create snakes first so food never spawns on top of a snake on round start.
         for (int i = 0; i < MAX_GAMEPADS; i++) {
             if (globalControllerManager->getController(i)) {
-                snakes.emplace_back(
+                snakes[i].init(
                     i,
-                    LOGICAL_WIDTH / 2 + i * 2,
-                    LOGICAL_HEIGHT / 2,
+                    (int)(LOGICAL_WIDTH / 2 + i * 2),
+                    (int)(LOGICAL_HEIGHT / 2),
                     playerColors[i]
                 );
+                playerCountAtStart++;
             }
         }
 
         // Spawn multiple foods after snakes exist (so spawnFood() can avoid them).
-        for (int i = 0; i < 3; i++) spawnFood(chooseNextFoodKind());
+        for (uint8_t i = 0; i < SnakeGameConfig::MAX_FOODS; i++) spawnFood(chooseNextFoodKind());
     }
 
     void reset() override {
@@ -367,9 +454,11 @@ public:
         const uint32_t now = millis();
 
         // Remove expired creature foods (keeps the playfield feeling alive)
-        for (size_t i = 0; i < foods.size();) {
+        for (uint8_t i = 0; i < foodCount;) {
             if (foods[i].kind != FOOD_APPLE && foods[i].expireMs != 0 && (int32_t)(foods[i].expireMs - now) <= 0) {
-                foods.erase(foods.begin() + (int)i);
+                // Remove by shifting down.
+                for (uint8_t j = i + 1; j < foodCount; j++) foods[j - 1] = foods[j];
+                if (foodCount > 0) foodCount--;
                 spawnFood(chooseNextFoodKind());
             } else {
                 i++;
@@ -377,17 +466,41 @@ public:
         }
 
         // Cleanup finished death animations (remove corpse)
-        for (auto& s : snakes) {
+        for (uint8_t si = 0; si < SnakeGameConfig::MAX_SNAKES; si++) {
+            Snake& s = snakes[si];
+            if (!s.enabled) continue;
             if (s.dying && (uint32_t)(now - s.deathStartMs) >= DEATH_BLINK_TOTAL_MS) {
                 s.dying = false;
                 s.body.clear();
             }
         }
 
+        // If everyone is done dying and nobody is alive, end the round.
+        // IMPORTANT: This must run BEFORE we build the active snake list below.
+        // Otherwise, when the last snake finishes its death blink, it becomes
+        // (!alive && !dying) and is excluded from the active list, causing an
+        // early return that would prevent GAME OVER from ever being set.
+        if (phase != PHASE_GAME_OVER && playerCountAtStart > 0) {
+            bool anyAlive = false;
+            bool anyDying = false;
+            for (uint8_t si = 0; si < SnakeGameConfig::MAX_SNAKES; si++) {
+                Snake& s = snakes[si];
+                if (!s.enabled) continue;
+                if (s.alive) anyAlive = true;
+                if (s.dying) anyDying = true;
+            }
+            if (!anyAlive && !anyDying) {
+                phase = PHASE_GAME_OVER;
+                gameOver = true;
+                return;
+            }
+        }
+
         // Countdown before starting movement (still accept input so players can buffer a direction)
         if (phase == PHASE_COUNTDOWN) {
-            for (auto& s : snakes) {
-                if (!s.alive) continue;
+            for (uint8_t si = 0; si < SnakeGameConfig::MAX_SNAKES; si++) {
+                Snake& s = snakes[si];
+                if (!s.enabled || !s.alive) continue;
                 ControllerPtr ctl = input->getController(s.playerIndex);
                 if (ctl) s.handleInput(ctl);
             }
@@ -400,7 +513,7 @@ public:
 
         if (phase == PHASE_GAME_OVER) return;
 
-        if ((uint32_t)(now - lastMove) < (uint32_t)SNAKE_SPEED_MS) return;
+        if ((uint32_t)(now - lastMove) < (uint32_t)SnakeGameConfig::MOVE_TICK_MS) return;
         lastMove = now;
 
         // -------------------------------------------------------------
@@ -409,18 +522,25 @@ public:
         // - Resolve food growth per-snake
         // - Then resolve collisions (self, other bodies, head-on, head-swap)
         // -------------------------------------------------------------
-        const int n = (int)snakes.size();
-        if (n <= 0) return;
+        uint8_t activeIdx[SnakeGameConfig::MAX_SNAKES];
+        uint8_t n = 0;
+        for (uint8_t si = 0; si < SnakeGameConfig::MAX_SNAKES; si++) {
+            if (!snakes[si].enabled) continue;
+            if (!snakes[si].alive && !snakes[si].dying) continue;
+            activeIdx[n++] = si;
+        }
+        if (n == 0) return;
 
-        std::vector<Point> nextHead(n);
-        std::vector<bool> willMove(n, false);
-        std::vector<bool> willGrow(n, false);
-        std::vector<int> foodHitIndex(n, -1);
-        std::vector<bool> collision(n, false);
+        Point nextHead[SnakeGameConfig::MAX_SNAKES];
+        bool willMove[SnakeGameConfig::MAX_SNAKES] = { false };
+        bool willGrow[SnakeGameConfig::MAX_SNAKES] = { false };
+        int8_t foodHitIndex[SnakeGameConfig::MAX_SNAKES];
+        bool collision[SnakeGameConfig::MAX_SNAKES] = { false };
+        for (uint8_t i = 0; i < n; i++) foodHitIndex[i] = -1;
 
         // 1) Inputs + next heads
-        for (int i = 0; i < n; i++) {
-            Snake& s = snakes[i];
+        for (uint8_t i = 0; i < n; i++) {
+            Snake& s = snakes[activeIdx[i]];
             if (!s.alive) continue;
 
             ControllerPtr ctl = input->getController(s.playerIndex);
@@ -434,7 +554,7 @@ public:
             s.handleInput(ctl);
             s.dir = s.nextDir;
 
-            Point head = s.body.front();
+            Point head = s.body.head();
             Point nh = head;
             if (s.dir == UP) nh.y--;
             else if (s.dir == DOWN) nh.y++;
@@ -442,28 +562,28 @@ public:
             else if (s.dir == RIGHT) nh.x++;
 
             // Wrap around edges (playfield only)
-            if (nh.x < 0) nh.x = LOGICAL_WIDTH - 1;
+            if (nh.x < 0) nh.x = (int16_t)(LOGICAL_WIDTH - 1);
             else if (nh.x >= LOGICAL_WIDTH) nh.x = 0;
-            if (nh.y < 0) nh.y = LOGICAL_HEIGHT - 1;
+            if (nh.y < 0) nh.y = (int16_t)(LOGICAL_HEIGHT - 1);
             else if (nh.y >= LOGICAL_HEIGHT) nh.y = 0;
 
             nextHead[i] = nh;
             willMove[i] = true;
 
             // Determine if this move would eat food (resolved later)
-            for (size_t fi = 0; fi < foods.size(); fi++) {
+            for (uint8_t fi = 0; fi < foodCount; fi++) {
                 if (pointInFood(foods[fi], nh)) {
                     willGrow[i] = true;
-                    foodHitIndex[i] = (int)fi;
+                    foodHitIndex[i] = (int8_t)fi;
                     break;
                 }
             }
         }
 
         // 2) Head-on collisions (same destination cell)
-        for (int i = 0; i < n; i++) {
+        for (uint8_t i = 0; i < n; i++) {
             if (!willMove[i]) continue;
-            for (int j = i + 1; j < n; j++) {
+            for (uint8_t j = (uint8_t)(i + 1); j < n; j++) {
                 if (!willMove[j]) continue;
                 if (nextHead[i].x == nextHead[j].x && nextHead[i].y == nextHead[j].y) {
                     collision[i] = true;
@@ -473,12 +593,12 @@ public:
         }
 
         // 3) Head-swap collisions (A goes to B head, B goes to A head)
-        for (int i = 0; i < n; i++) {
+        for (uint8_t i = 0; i < n; i++) {
             if (!willMove[i]) continue;
-            for (int j = i + 1; j < n; j++) {
+            for (uint8_t j = (uint8_t)(i + 1); j < n; j++) {
                 if (!willMove[j]) continue;
-                const Point aHead = snakes[i].body.front();
-                const Point bHead = snakes[j].body.front();
+                const Point aHead = snakes[activeIdx[i]].body.head();
+                const Point bHead = snakes[activeIdx[j]].body.head();
                 if (nextHead[i].x == bHead.x && nextHead[i].y == bHead.y &&
                     nextHead[j].x == aHead.x && nextHead[j].y == aHead.y) {
                     collision[i] = true;
@@ -489,25 +609,26 @@ public:
 
         // 4) Body collisions (including self)
         // Allow moving into a tail cell IF that tail is moving away this tick (i.e., !willGrow for that snake).
-        for (int i = 0; i < n; i++) {
+        for (uint8_t i = 0; i < n; i++) {
             if (!willMove[i]) continue;
             const Point nh = nextHead[i];
 
-            for (int j = 0; j < n; j++) {
-                Snake& other = snakes[j];
+            for (uint8_t j = 0; j < n; j++) {
+                Snake& other = snakes[activeIdx[j]];
                 if (!other.alive) continue;
 
                 const bool otherTailVacates = willMove[j] && !willGrow[j];
-                const size_t otherLen = other.body.size();
+                const uint16_t otherLen = other.body.size();
 
-                for (size_t k = 0; k < otherLen; k++) {
+                for (uint16_t k = 0; k < otherLen; k++) {
                     // If other tail vacates, skip its last segment for collision checks.
-                    if (otherTailVacates && k == otherLen - 1) continue;
+                    if (otherTailVacates && k == (uint16_t)(otherLen - 1)) continue;
 
                     // For self, ignore index 0 (current head); we only care about hitting the body.
                     if (i == j && k == 0) continue;
 
-                    if (other.body[k].x == nh.x && other.body[k].y == nh.y) {
+                    const Point& seg = other.body.at(k);
+                    if (seg.x == nh.x && seg.y == nh.y) {
                         collision[i] = true;
                         break;
                     }
@@ -518,17 +639,17 @@ public:
 
         // 5) Apply moves + resolve food (single food can only be eaten once per tick)
         // If multiple snakes target the same food cell, head-on collision above will kill them; still, avoid double erase.
-        for (int i = 0; i < n; i++) {
+        for (uint8_t i = 0; i < n; i++) {
             if (!willMove[i]) continue;
 
-            Snake& s = snakes[i];
+            Snake& s = snakes[activeIdx[i]];
             if (!s.alive) continue;
 
             // Move the snake (we still place the head even if it collided,
             // so the frozen frame shows the collision position clearly).
             const Point nh = nextHead[i];
-            s.body.insert(s.body.begin(), nh);
-            if (!willGrow[i]) s.body.pop_back();
+            s.body.pushHead(nh);
+            if (!willGrow[i]) s.body.popTail();
 
             // Move any existing bulge "down" the body each tick.
             if (s.bulgeIndex >= 0) {
@@ -547,10 +668,11 @@ public:
             if (willGrow[i] && foodHitIndex[i] >= 0) {
                 // Re-check that the food still exists at this index (it may have been erased already)
                 const int fi = foodHitIndex[i];
-                if (fi >= 0 && fi < (int)foods.size() && pointInFood(foods[fi], nh)) {
+                if (fi >= 0 && fi < (int)foodCount && pointInFood(foods[fi], nh)) {
                     const FoodKind kind = foods[fi].kind;
                     s.score += pointsForFood(kind);
-                    foods.erase(foods.begin() + fi);
+                    for (int j = fi + 1; j < (int)foodCount; j++) foods[j - 1] = foods[j];
+                    if (foodCount > 0) foodCount--;
                     // Start a new bulge right behind the head.
                     s.bulgeIndex = 1;
                     spawnFood(chooseNextFoodKind());
@@ -560,11 +682,13 @@ public:
 
         bool anyAlive = false;
         bool anyDying = false;
-        for (auto& s : snakes) {
+        for (uint8_t si = 0; si < SnakeGameConfig::MAX_SNAKES; si++) {
+            Snake& s = snakes[si];
+            if (!s.enabled) continue;
             if (s.alive) anyAlive = true;
             if (s.dying) anyDying = true;
         }
-        if (!anyAlive && !anyDying && !snakes.empty()) {
+        if (!anyAlive && !anyDying && playerCountAtStart > 0) {
             phase = PHASE_GAME_OVER;
             gameOver = true;
         }
@@ -594,14 +718,22 @@ public:
         // Position text with 1px margin to prevent overflow at top edge
         int hudY = 6;  // Moved down by 2px (1px overflow fix + 1px margin)
         int hudX = 2;
-        for (size_t i = 0; i < snakes.size(); i++) {
+        uint8_t activeIdx[SnakeGameConfig::MAX_SNAKES];
+        uint8_t n = 0;
+        for (uint8_t si = 0; si < SnakeGameConfig::MAX_SNAKES; si++) {
+            if (!snakes[si].enabled) continue;
+            activeIdx[n++] = si;
+        }
+
+        for (uint8_t i = 0; i < n; i++) {
             char buf[10];
-            snprintf(buf, sizeof(buf), "P%u:%d", (unsigned)i + 1, snakes[i].score);
-            SmallFont::drawString(display, hudX, hudY, buf, snakes[i].color);
+            Snake& s = snakes[activeIdx[i]];
+            snprintf(buf, sizeof(buf), "P%u:%d", (unsigned)i + 1u, s.score);
+            SmallFont::drawString(display, hudX, hudY, buf, s.color);
             hudX += 16;
         }
         char pbuf[8];
-        snprintf(pbuf, sizeof(pbuf), "%dP", (int)snakes.size());
+        snprintf(pbuf, sizeof(pbuf), "%dP", (int)n);
         SmallFont::drawString(display, PANEL_RES_X - 14, hudY, pbuf, COLOR_YELLOW);
 
         // HUD divider
@@ -638,50 +770,17 @@ public:
 
         // Draw foods/creatures.
         auto drawFoodSprite4x4 = [&](int px, int py, FoodKind kind, uint16_t col) {
-            // Pixel-art inspired by Snake 2, adapted to 4x4 pixels.
-            // 1 = draw pixel
-            static const uint8_t SPR[6][4][4] = {
-                // APPLE (hollow-ish)
-                {{0,1,1,0},
-                 {1,0,0,1},
-                 {1,0,0,1},
-                 {0,1,1,0}},
-                // MOUSE
-                {{1,0,0,1},
-                 {1,1,1,1},
-                 {1,0,0,1},
-                 {0,1,1,0}},
-                // FROG
-                {{1,1,1,1},
-                 {1,0,0,1},
-                 {1,1,1,1},
-                 {1,0,0,1}},
-                // BIRD
-                {{0,1,1,0},
-                 {1,1,1,1},
-                 {0,1,1,1},
-                 {0,0,1,0}},
-                // FISH
-                {{0,1,1,0},
-                 {1,1,1,1},
-                 {1,0,1,0},
-                 {0,1,1,0}},
-                // BUG
-                {{0,1,1,0},
-                 {1,1,1,1},
-                 {1,0,0,1},
-                 {0,1,1,0}},
-            };
             const uint8_t k = (uint8_t)kind;
             for (int yy = 0; yy < 4; yy++) {
                 for (int xx = 0; xx < 4; xx++) {
-                    if (!SPR[k][yy][xx]) continue;
+                    if (!SnakeGameConfig::FOOD_SPRITE_4X4[k][yy][xx]) continue;
                     drawPixelClipped(px + xx, py + yy, col);
                 }
             }
         };
 
-        for (auto& f : foods) {
+        for (uint8_t fi = 0; fi < foodCount; fi++) {
+            const FoodItem& f = foods[fi];
             const int px = PLAYFIELD_CONTENT_X + f.p.x * PIXEL_SIZE;
             const int py = PLAYFIELD_CONTENT_Y + f.p.y * PIXEL_SIZE;
 
@@ -695,7 +794,8 @@ public:
         }
 
         // Draw snakes (Nokia style: striped body, head/eyes, mouth animation, bulge)
-        for (auto& s : snakes) {
+        for (uint8_t ii = 0; ii < n; ii++) {
+            Snake& s = snakes[activeIdx[ii]];
             // Alive snakes draw always. Dead snakes blink for a short time, then disappear.
             bool drawSnake = s.alive;
             if (!drawSnake && s.dying) {
@@ -709,10 +809,11 @@ public:
             // Determine if mouth should be open: if the next move will eat a food hitbox and it's "soon".
             const uint32_t nowMs = millis();
             const uint32_t dt = (uint32_t)(nowMs - lastMove);
-            const uint32_t msToMove = (dt >= (uint32_t)SNAKE_SPEED_MS) ? 0u : ((uint32_t)SNAKE_SPEED_MS - dt);
+            const uint32_t tickMs = (uint32_t)SnakeGameConfig::MOVE_TICK_MS;
+            const uint32_t msToMove = (dt >= tickMs) ? 0u : (tickMs - dt);
             bool mouthOpen = false;
             if (phase == PHASE_PLAYING && msToMove <= 220u && s.alive) {
-                Point nh = s.body.front();
+                Point nh = s.body.head();
                 Direction d = s.nextDir;
                 if (d == UP) nh.y--;
                 else if (d == DOWN) nh.y++;
@@ -722,8 +823,8 @@ public:
                 else if (nh.x >= LOGICAL_WIDTH) nh.x = 0;
                 if (nh.y < 0) nh.y = LOGICAL_HEIGHT - 1;
                 else if (nh.y >= LOGICAL_HEIGHT) nh.y = 0;
-                for (const auto& f : foods) {
-                    if (pointInFood(f, nh)) { mouthOpen = true; break; }
+                for (uint8_t fi2 = 0; fi2 < foodCount; fi2++) {
+                    if (pointInFood(foods[fi2], nh)) { mouthOpen = true; break; }
                 }
             }
 
@@ -741,8 +842,8 @@ public:
             };
             const uint16_t stripeCol = lighten565(baseCol, 110); // ~43% towards white
 
-            for (size_t idx = 0; idx < s.body.size(); idx++) {
-                const Point& p = s.body[idx];
+            for (uint16_t idx = 0; idx < s.body.size(); idx++) {
+                const Point& p = s.body.at(idx);
                 const int px = PLAYFIELD_CONTENT_X + p.x * PIXEL_SIZE;
                 const int py = PLAYFIELD_CONTENT_Y + p.y * PIXEL_SIZE;
 

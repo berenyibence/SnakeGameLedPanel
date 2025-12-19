@@ -10,8 +10,8 @@
 class Menu : public ListModel {
 public:
     // Main menu options (actual indices). Keep Settings LAST (engine treats it specially).
-    const char* options[11] = { "Snake", "Tron", "Pong", "Breakout", "Shooter", "Labyrinth", "Tetris", "Emojis", "Asteroids", "Leaderboard", "Settings" };
-    static const int NUM_OPTIONS = 11;
+    const char* options[10] = { "Snake", "Tron", "Pong", "Breakout", "Shooter", "Labyrinth", "Tetris", "Asteroids", "Leaderboard", "Settings" };
+    static const int NUM_OPTIONS = 10;
 
     // Reusable list widget state (selection + scrolling + input).
     ScrollableList list;
@@ -34,7 +34,7 @@ public:
         if (index == 6) {  // Tetris
             return players == 1;
         }
-        if (index == 8) {  // Asteroids
+        if (index == 7) {  // Asteroids
             return players == 1;
         }
         // All others always visible

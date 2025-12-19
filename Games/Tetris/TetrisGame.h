@@ -1,12 +1,13 @@
 #pragma once
 #include <Arduino.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include "GameBase.h"
-#include "ControllerManager.h"
-#include "config.h"
-#include "SmallFont.h"
-#include "UserProfiles.h"
-#include "GameOverLeaderboardView.h"
+#include "../../GameBase.h"
+#include "../../ControllerManager.h"
+#include "../../config.h"
+#include "../../SmallFont.h"
+#include "../../UserProfiles.h"
+#include "../../GameOverLeaderboardView.h"
+#include "TetrisGameConfig.h"
 
 /**
  * TetrisGame - Classic Tetris game
@@ -15,10 +16,10 @@
 class TetrisGame : public GameBase {
 private:
     // Tetris board dimensions
-    static const int BOARD_WIDTH = 10;
-    static const int BOARD_HEIGHT = 20;
+    static constexpr int BOARD_WIDTH = TetrisGameConfig::BOARD_WIDTH;
+    static constexpr int BOARD_HEIGHT = TetrisGameConfig::BOARD_HEIGHT;
     // Classic look: 3×3 pixel cells for the board.
-    static const int CELL_SIZE = 3;  // Size of each cell in pixels
+    static constexpr int CELL_SIZE = TetrisGameConfig::CELL_SIZE;  // Size of each cell in pixels
     
     // Board: 0 = empty, 1-7 = different colored blocks
     uint8_t board[BOARD_HEIGHT][BOARD_WIDTH];
@@ -48,7 +49,7 @@ private:
     unsigned long lastDrop;
     unsigned long lastHold;
     unsigned long inputIgnoreUntil;  // Ignore held buttons briefly after start (prevents "stale" menu input)
-    static const unsigned long INITIAL_FALL_DELAY = 500;  // ms
+    static constexpr unsigned long INITIAL_FALL_DELAY = TetrisGameConfig::INITIAL_FALL_DELAY_MS;  // ms
 
     // Line clear visual feedback (flash rows before removing)
     bool lineFlashing;
@@ -58,12 +59,101 @@ private:
     uint8_t flashingRows[4];
     uint8_t flashingRowCount;
     uint8_t pendingCleared; // number of lines being cleared (for scoring/level)
-    static const unsigned long FLASH_TOGGLE_MS = 90;
+    static constexpr unsigned long FLASH_TOGGLE_MS = TetrisGameConfig::FLASH_TOGGLE_MS;
     
-    // Tetris pieces (Tetrominoes) - 7 types
-    static const uint8_t PIECES[7][4][4][4];  // [type][rotation][y][x]
-    static const uint16_t PIECE_COLORS[7];
+    // Tetris pieces (Tetrominoes) - 7 types (from TetrisGameConfig).
+    static inline constexpr auto& PIECES = TetrisGameConfig::PIECES;             // [type][rotation][y][x]
+    static inline constexpr auto& PIECE_COLORS = TetrisGameConfig::PIECE_COLORS; // RGB565 palette
+
+    // ---------------------------------------------------------
+    // Small color helper (RGB565 dimming) - used for ghost piece
+    // ---------------------------------------------------------
+    static inline uint16_t dimColor(uint16_t c, uint8_t mul /*0..255*/) {
+        uint8_t r = (uint8_t)((c >> 11) & 0x1F);
+        uint8_t g = (uint8_t)((c >> 5) & 0x3F);
+        uint8_t b = (uint8_t)(c & 0x1F);
+        r = (uint8_t)((r * mul) / 255);
+        g = (uint8_t)((g * mul) / 255);
+        b = (uint8_t)((b * mul) / 255);
+        return (uint16_t)((r << 11) | (g << 5) | b);
+    }
     
+    // ---------------------------------------------------------
+    // Tetris-only "Tetris!" explosion particles (spawned ONLY when clearing 4 lines)
+    // ---------------------------------------------------------
+    struct Particle {
+        bool active;
+        float x;
+        float y;
+        float vx;
+        float vy;
+        uint16_t color;
+        uint32_t endMs;
+    };
+    static constexpr int MAX_PARTICLES = 70;
+    Particle particles[MAX_PARTICLES] = {};
+
+    void spawnTetrisParticles(const uint8_t rows[4], uint8_t count, uint32_t now) {
+        // Only for a true "tetris" (4 lines at once).
+        if (count != 4) return;
+
+        // Board pixel-space (matches draw() layout): board is flush-left.
+        const int outerY = 1;
+        const int boardStartX = 1;
+        const int boardStartY = outerY + 1;
+        const int innerW = BOARD_WIDTH * CELL_SIZE;
+
+        // Emit a modest amount; visually punchy but cheap.
+        const int bursts = 34;
+        for (int n = 0; n < bursts; n++) {
+            int slot = -1;
+            for (int i = 0; i < MAX_PARTICLES; i++) {
+                if (!particles[i].active) { slot = i; break; }
+            }
+            if (slot < 0) return;
+
+            const uint8_t ry = rows[random(0, 4)];
+            const int px = boardStartX + random(0, innerW);
+            const int py = boardStartY + (int)ry * CELL_SIZE + (CELL_SIZE / 2);
+
+            Particle& p = particles[slot];
+            p.active = true;
+            p.x = (float)px;
+            p.y = (float)py;
+            p.vx = ((float)random(-80, 81) / 100.0f) * 0.9f;
+            p.vy = -(((float)random(20, 110) / 100.0f) * 0.9f);
+            // Mix bright white with the current piece color so it feels themed.
+            p.color = (random(0, 100) < 45) ? COLOR_WHITE : currentPiece.color;
+            p.endMs = now + (uint32_t)random(260, 620);
+        }
+    }
+
+    void updateParticles(uint32_t now) {
+        for (int i = 0; i < MAX_PARTICLES; i++) {
+            if (!particles[i].active) continue;
+            if ((int32_t)(particles[i].endMs - now) <= 0) {
+                particles[i].active = false;
+                continue;
+            }
+            particles[i].x += particles[i].vx;
+            particles[i].y += particles[i].vy;
+            particles[i].vx *= 0.98f;
+            particles[i].vy *= 0.98f;
+            particles[i].vy += 0.028f; // gravity
+        }
+    }
+
+    void drawParticles(MatrixPanel_I2S_DMA* display, uint32_t now) const {
+        for (int i = 0; i < MAX_PARTICLES; i++) {
+            if (!particles[i].active) continue;
+            if ((int32_t)(particles[i].endMs - now) <= 0) continue;
+            const int x = (int)particles[i].x;
+            const int y = (int)particles[i].y;
+            if (x < 0 || x >= PANEL_RES_X || y < 0 || y >= PANEL_RES_Y) continue;
+            display->drawPixel(x, y, particles[i].color);
+        }
+    }
+
     /**
      * Initialize a piece
      */
@@ -205,6 +295,18 @@ private:
         lastHold = now;
     }
 
+    /**
+     * Compute ghost landing Y for the current piece (hard-drop target).
+     * This returns the Y position where the current piece would lock if dropped.
+     */
+    int computeGhostY() {
+        int y = currentPiece.y;
+        while (canPlacePiece(currentPiece, 0, (y - currentPiece.y) + 1, currentPiece.rotation)) {
+            y++;
+        }
+        return y;
+    }
+
 public:
     TetrisGame() 
         : gameOver(false), score(0), linesCleared(0), level(1), 
@@ -260,6 +362,9 @@ public:
         initPiece(nextPieces[0], random(0, 7));
         initPiece(nextPieces[1], random(0, 7));
         initPiece(nextPieces[2], random(0, 7));
+
+        // Clear particles
+        for (int i = 0; i < MAX_PARTICLES; i++) particles[i].active = false;
     }
 
     void reset() override {
@@ -273,6 +378,8 @@ public:
         if (!p1 || !p1->isConnected()) return;
         
         unsigned long now = millis();
+        // Particle simulation runs regardless of line flashing.
+        updateParticles((uint32_t)now);
         if (lineFlashing) {
             // Flash the cleared rows before removing them.
             if (now - lastFlashToggleMs >= FLASH_TOGGLE_MS) {
@@ -284,6 +391,8 @@ public:
                     flashOn = false;
 
                     // Finalize clear, update score/level, then spawn new piece.
+                    // Tetris "boom" particles ONLY when 4 lines were cleared together.
+                    spawnTetrisParticles(flashingRows, pendingCleared, (uint32_t)now);
                     removeLines(flashingRows, (int)flashingRowCount);
 
                     linesCleared += pendingCleared;
@@ -394,62 +503,96 @@ public:
             return;
         }
 
-        // Layout (centered, 1px margins): [HOLD box] [board] [NEXT box]
-        // - Board uses 3×3 blocks
-        // - Hold/Next previews use 2×2 blocks to save space
-        const int previewCell = 2;
-        const int previewSize = 4 * previewCell;     // 4x4 tetromino grid
-        const int boxOuter = previewSize + 2;        // border included
+        // Layout (as requested):
+        // - Board is flush LEFT.
+        // - Right HUD column is vertically centered and contains:
+        //   score (6 digits), level (3 digits), then [NEXT (3 tall)] [HOLD] side-by-side.
+        // Board uses 3×3 blocks, previews use 2×2.
+        const int outerY = 1;
+        const int boardOuterX = 0;
         const int boardOuterW = BOARD_WIDTH * CELL_SIZE + 2;
         const int boardOuterH = BOARD_HEIGHT * CELL_SIZE + 2;
-        const int gap = 1; // 1px gap between panels to maximize space
-        const int totalW = boxOuter + gap + boardOuterW + gap + boxOuter;
-        const int originX = (PANEL_RES_X - totalW) / 2;
-        const int outerY = 1; // align boxes with top of game area (no top HUD)
-
-        const int holdOuterX = originX;
-        const int boardOuterX = holdOuterX + boxOuter + gap;
-        const int nextOuterX = boardOuterX + boardOuterW + gap;
-
         const int boardStartX = boardOuterX + 1;
         const int boardStartY = outerY + 1;
 
-        // Hold box (aligned with top of playfield)
-        display->drawRect(holdOuterX, outerY, boxOuter, boxOuter, COLOR_WHITE);
+        const int hudX = boardOuterX + boardOuterW + 1; // 1px gap
 
-        // Next box is taller to show 3 upcoming pieces (stacked).
-        const int vGap = 1; // 1px gap between preview rows
+        const int previewCell = 2;
+        const int previewSize = 4 * previewCell; // 8
+        const int boxOuter = previewSize + 2;    // 10
+        const int boxGap = 1;
+
+        // Next + Hold boxes side-by-side
+        // - Next remains 3 pieces tall (stacked)
+        // - Hold is 1 piece tall
+        const int vGap = 1; // 1px gap between stacked previews
         const int nextInnerH = (previewSize * 3) + (vGap * 2);
         const int nextOuterH = nextInnerH + 2; // border
-        display->drawRect(nextOuterX, outerY, boxOuter, nextOuterH, COLOR_WHITE);
+        const int boxesW = (boxOuter * 2) + boxGap;
+        const int hudW = PANEL_RES_X - hudX;
+        const int hudBlockX = hudX + max(0, (hudW - boxesW) / 2);
 
-        // Info under the boxes (to preserve vertical board space):
-        // - Score under HOLD (left), written vertically (one digit per line)
-        // - Level under NEXT (right), just the number (no "L:")
-        const int scoreBaseY = outerY + boxOuter + 6; // TomThumb baseline
-        const int levelY = outerY + nextOuterH + 6;
+        // Vertically center the HUD block within the board height.
+        // Text area is 2 lines; we use a fixed height for stability.
+        const int textH = 18;     // includes both lines and a bit of breathing room
+        const int textToBoxesGap = 4;
+        const int hudBlockH = textH + textToBoxesGap + nextOuterH;
+        const int hudBlockY = outerY + max(0, (boardOuterH - hudBlockH) / 2);
 
-        // Score: vertical digits
+        const int scoreY = hudBlockY + 6;
+        const int levelY = hudBlockY + 14;
+        const int boxesY = hudBlockY + textH + textToBoxesGap;
+
+        const int nextOuterX = hudBlockX;
+        const int holdOuterX = hudBlockX + boxOuter + boxGap;
+
+        // Score / Level (numbers only; fixed width with leading zeros)
+        // Leading zeros are rendered dimmer (less bright).
+        // - Score: 6 chars, e.g. 000250
+        // - Level: 3 chars, e.g. 007
         {
-            char sbuf[16];
-            snprintf(sbuf, sizeof(sbuf), "%d", score);
-            const int digitX = holdOuterX + (boxOuter / 2) - 1; // roughly centered under the box
-            int yy = scoreBaseY;
-            for (int i = 0; sbuf[i] != '\0'; i++) {
-                SmallFont::drawChar(display, digitX, yy, sbuf[i], COLOR_YELLOW);
-                yy += 8;
-                if (yy > PANEL_RES_Y - 2) break;
+            char sbuf[10];
+            snprintf(sbuf, sizeof(sbuf), "%06d", max(0, score));
+            // TomThumb is tiny; approximate centering with a 4px advance per char.
+            const int textW = 6 * 4;
+            const int sx = hudBlockX + max(0, (boxesW - textW) / 2);
+            const uint16_t dim = dimColor(COLOR_YELLOW, 120);
+
+            // Find first non-zero digit (keep at least the last digit bright).
+            int firstNZ = 5;
+            for (int i = 0; i < 6; i++) {
+                if (sbuf[i] != '0') { firstNZ = i; break; }
+            }
+            if (firstNZ >= 6) firstNZ = 5;
+
+            for (int i = 0; i < 6; i++) {
+                const uint16_t c = (i < firstNZ) ? dim : COLOR_YELLOW;
+                SmallFont::drawChar(display, sx + i * 4, scoreY, sbuf[i], c);
+            }
+        }
+        {
+            char lbuf[8];
+            snprintf(lbuf, sizeof(lbuf), "%03d", max(0, level));
+            const int textW = 3 * 4;
+            const int lx = hudBlockX + max(0, (boxesW - textW) / 2);
+            const uint16_t dim = dimColor(COLOR_GREEN, 120);
+
+            int firstNZ = 2;
+            for (int i = 0; i < 3; i++) {
+                if (lbuf[i] != '0') { firstNZ = i; break; }
+            }
+            if (firstNZ >= 3) firstNZ = 2;
+
+            for (int i = 0; i < 3; i++) {
+                const uint16_t c = (i < firstNZ) ? dim : COLOR_GREEN;
+                SmallFont::drawChar(display, lx + i * 4, levelY, lbuf[i], c);
             }
         }
 
-        // Level: compact (just digits)
-        {
-            char lbuf[6];
-            snprintf(lbuf, sizeof(lbuf), "%d", level);
-            SmallFont::drawString(display, nextOuterX + 3, levelY, lbuf, COLOR_GREEN);
-        }
+        display->drawRect(nextOuterX, boxesY, boxOuter, nextOuterH, COLOR_WHITE);
+        display->drawRect(holdOuterX, boxesY, boxOuter, boxOuter, COLOR_WHITE);
 
-        // Draw board background
+        // Board border
         display->drawRect(boardOuterX, outerY, boardOuterW, boardOuterH, COLOR_WHITE);
         
         // Draw placed blocks
@@ -475,6 +618,25 @@ public:
                 if (board[y][x] != 0) {
                     display->fillRect(screenX, screenY, CELL_SIZE, CELL_SIZE,
                                       PIECE_COLORS[board[y][x] - 1]);
+                }
+            }
+        }
+
+        // Ghost piece (hard-drop target) - drawn BEFORE the active piece.
+        // This shows where UP would land the piece.
+        if (!lineFlashing) {
+            const int ghostY = computeGhostY();
+            const uint16_t ghostCol = dimColor(currentPiece.color, 85); // ~33% intensity
+            for (int y = 0; y < 4; y++) {
+                for (int x = 0; x < 4; x++) {
+                    if (!PIECES[currentPiece.type][currentPiece.rotation][y][x]) continue;
+                    const int boardX = currentPiece.x + x;
+                    const int boardY = ghostY + y;
+                    if (boardY < 0) continue;
+                    const int screenX = boardStartX + boardX * CELL_SIZE;
+                    const int screenY = boardStartY + boardY * CELL_SIZE;
+                    // Outline looks better than fill for a "ghost" on 3×3 cells.
+                    display->drawRect(screenX, screenY, CELL_SIZE, CELL_SIZE, ghostCol);
                 }
             }
         }
@@ -531,14 +693,17 @@ public:
             }
         };
 
-        // Hold preview (left)
-        drawPreview(holdOuterX, outerY, holdType, hasHold);
-
-        // Next previews (right): show 3 pieces stacked
+        // Next previews (left, tall box): show 3 pieces stacked.
         for (int i = 0; i < 3; i++) {
-            const int previewOuterY = outerY + i * (previewSize + vGap);
+            const int previewOuterY = boxesY + i * (previewSize + vGap);
             drawPreview(nextOuterX, previewOuterY, nextPieces[i].type, true);
         }
+
+        // Hold preview (right, square box)
+        drawPreview(holdOuterX, boxesY, holdType, hasHold);
+
+        // Tetris particles (overlay)
+        drawParticles(display, (uint32_t)millis());
     }
 
     bool isGameOver() override {
@@ -554,52 +719,6 @@ public:
     uint32_t leaderboardScore() const override { return (score > 0) ? (uint32_t)score : 0u; }
 };
 
-// Tetris piece definitions
-const uint8_t TetrisGame::PIECES[7][4][4][4] = {
-    // I piece
-    {{{1,1,1,1}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}},
-     {{0,0,1,0}, {0,0,1,0}, {0,0,1,0}, {0,0,1,0}},
-     {{1,1,1,1}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0}},
-     {{0,0,1,0}, {0,0,1,0}, {0,0,1,0}, {0,0,1,0}}},
-    // O piece
-    {{{1,1,0,0}, {1,1,0,0}, {0,0,0,0}, {0,0,0,0}},
-     {{1,1,0,0}, {1,1,0,0}, {0,0,0,0}, {0,0,0,0}},
-     {{1,1,0,0}, {1,1,0,0}, {0,0,0,0}, {0,0,0,0}},
-     {{1,1,0,0}, {1,1,0,0}, {0,0,0,0}, {0,0,0,0}}},
-    // T piece
-    {{{0,1,0,0}, {1,1,1,0}, {0,0,0,0}, {0,0,0,0}},
-     {{0,1,0,0}, {0,1,1,0}, {0,1,0,0}, {0,0,0,0}},
-     {{0,0,0,0}, {1,1,1,0}, {0,1,0,0}, {0,0,0,0}},
-     {{0,1,0,0}, {1,1,0,0}, {0,1,0,0}, {0,0,0,0}}},
-    // S piece
-    {{{0,1,1,0}, {1,1,0,0}, {0,0,0,0}, {0,0,0,0}},
-     {{0,1,0,0}, {0,1,1,0}, {0,0,1,0}, {0,0,0,0}},
-     {{0,1,1,0}, {1,1,0,0}, {0,0,0,0}, {0,0,0,0}},
-     {{0,1,0,0}, {0,1,1,0}, {0,0,1,0}, {0,0,0,0}}},
-    // Z piece
-    {{{1,1,0,0}, {0,1,1,0}, {0,0,0,0}, {0,0,0,0}},
-     {{0,0,1,0}, {0,1,1,0}, {0,1,0,0}, {0,0,0,0}},
-     {{1,1,0,0}, {0,1,1,0}, {0,0,0,0}, {0,0,0,0}},
-     {{0,0,1,0}, {0,1,1,0}, {0,1,0,0}, {0,0,0,0}}},
-    // J piece
-    {{{1,0,0,0}, {1,1,1,0}, {0,0,0,0}, {0,0,0,0}},
-     {{0,1,1,0}, {0,1,0,0}, {0,1,0,0}, {0,0,0,0}},
-     {{0,0,0,0}, {1,1,1,0}, {0,0,1,0}, {0,0,0,0}},
-     {{0,1,0,0}, {0,1,0,0}, {1,1,0,0}, {0,0,0,0}}},
-    // L piece
-    {{{0,0,1,0}, {1,1,1,0}, {0,0,0,0}, {0,0,0,0}},
-     {{0,1,0,0}, {0,1,0,0}, {0,1,1,0}, {0,0,0,0}},
-     {{0,0,0,0}, {1,1,1,0}, {1,0,0,0}, {0,0,0,0}},
-     {{1,1,0,0}, {0,1,0,0}, {0,1,0,0}, {0,0,0,0}}}
-};
-
-const uint16_t TetrisGame::PIECE_COLORS[7] = {
-    COLOR_CYAN,    // I
-    COLOR_YELLOW,  // O
-    COLOR_PURPLE,  // T
-    COLOR_GREEN,   // S
-    COLOR_RED,     // Z
-    COLOR_BLUE,    // J
-    COLOR_ORANGE   // L
-};
+// NOTE: Tetromino shapes + colors moved to `Games/Tetris/TetrisGameSprites.h`
+// and are exposed via `TetrisGameConfig`.
 

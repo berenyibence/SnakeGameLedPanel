@@ -1,15 +1,15 @@
 #pragma once
 #include <Arduino.h>
 #include <math.h>
-#include <vector>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include "GameBase.h"
-#include "ControllerManager.h"
-#include "config.h"
-#include "SmallFont.h"
-#include "Settings.h"
-#include "UserProfiles.h"
-#include "GameOverLeaderboardView.h"
+#include "../../GameBase.h"
+#include "../../ControllerManager.h"
+#include "../../config.h"
+#include "../../SmallFont.h"
+#include "../../Settings.h"
+#include "../../UserProfiles.h"
+#include "../../GameOverLeaderboardView.h"
+#include "AsteroidsGameConfig.h"
 
 /**
  * AsteroidsGame - Classic Asteroids-inspired gameplay adapted for a 64x64 HUB75 panel.
@@ -30,24 +30,27 @@ private:
     // ---------------------------------------------------------
     // Layout
     // ---------------------------------------------------------
-    static constexpr int HUD_H = 8;  // reserved for text HUD
+    static constexpr int HUD_H = AsteroidsGameConfig::HUD_H;  // reserved for text HUD
 
     // ---------------------------------------------------------
     // Tuning
     // ---------------------------------------------------------
-    static constexpr uint32_t UPDATE_INTERVAL_MS = 16;  // ~60Hz logic
-    static constexpr float MAX_SPEED = 2.6f;
-    static constexpr float MOVE_SMOOTH = 0.18f;   // 0..1 (higher = snappier)
-    static constexpr float STICK_DEADZONE = 0.18f; // 0..1
+    static constexpr uint32_t UPDATE_INTERVAL_MS = AsteroidsGameConfig::UPDATE_INTERVAL_MS;  // ~60Hz logic
+    static constexpr float MAX_SPEED = AsteroidsGameConfig::MAX_SPEED;
+    static constexpr float MOVE_SMOOTH = AsteroidsGameConfig::MOVE_SMOOTH;   // 0..1 (higher = snappier)
+    static constexpr float STICK_DEADZONE = AsteroidsGameConfig::STICK_DEADZONE; // 0..1
 
-    static constexpr uint32_t SHOT_COOLDOWN_MS = 180;
-    static constexpr uint32_t BULLET_LIFE_MS = 700;
-    static constexpr int MAX_BULLETS = 6;
+    static constexpr uint32_t SHOT_COOLDOWN_MS = AsteroidsGameConfig::SHOT_COOLDOWN_MS;
+    static constexpr uint32_t BULLET_LIFE_MS = AsteroidsGameConfig::BULLET_LIFE_MS;
+    static constexpr int MAX_BULLETS = AsteroidsGameConfig::MAX_BULLETS;
+    static constexpr float BULLET_SPEED = AsteroidsGameConfig::BULLET_SPEED;
 
-    static constexpr uint32_t RESPAWN_INVULN_MS = 1500;
-    static constexpr uint32_t HYPERSPACE_COOLDOWN_MS = 1200;
-    static constexpr int16_t AXIS_DIVISOR = 512;   // Bluepad32 commonly uses ~[-512..512]
-    static constexpr uint16_t TRIGGER_THRESHOLD = 360; // analog trigger threshold (0..1023-ish)
+    static constexpr uint32_t RESPAWN_INVULN_MS = AsteroidsGameConfig::RESPAWN_INVULN_MS;
+    static constexpr uint32_t HYPERSPACE_COOLDOWN_MS = AsteroidsGameConfig::HYPERSPACE_COOLDOWN_MS;
+    static constexpr int16_t AXIS_DIVISOR = AsteroidsGameConfig::AXIS_DIVISOR;   // Bluepad32 commonly uses ~[-512..512]
+    static constexpr uint16_t TRIGGER_THRESHOLD = AsteroidsGameConfig::TRIGGER_THRESHOLD; // analog trigger threshold
+
+    static constexpr uint8_t MAX_ASTEROIDS = AsteroidsGameConfig::MAX_ASTEROIDS;
 
     // ---------------------------------------------------------
     // Entities
@@ -69,9 +72,6 @@ private:
         uint32_t bornMs;
         bool active;
         uint16_t color;
-
-        Bullet(float xPos, float yPos, float vxIn, float vyIn, uint32_t now)
-            : x(xPos), y(yPos), vx(vxIn), vy(vyIn), bornMs(now), active(true), color(COLOR_CYAN) {}
     };
 
     struct Asteroid {
@@ -83,19 +83,14 @@ private:
         uint8_t radius; // pixels
         bool alive;
         uint16_t color;
-
-        Asteroid(float xPos, float yPos, float vxIn, float vyIn, uint8_t s)
-            : x(xPos), y(yPos), vx(vxIn), vy(vyIn), size(s),
-              radius((s == 2) ? 6 : (s == 1) ? 4 : 2),
-              alive(true), color(COLOR_WHITE) {}
     };
 
     // ---------------------------------------------------------
     // State
     // ---------------------------------------------------------
     Ship ship;
-    std::vector<Bullet> bullets;
-    std::vector<Asteroid> asteroids;
+    Bullet bullets[MAX_BULLETS];
+    Asteroid asteroids[MAX_ASTEROIDS];
 
     bool gameOver = false;
     int score = 0;
@@ -199,8 +194,8 @@ private:
 
     void spawnWave(uint32_t now) {
         (void)now;
-        asteroids.clear();
-        bullets.clear();
+        for (int i = 0; i < MAX_ASTEROIDS; i++) asteroids[i].alive = false;
+        for (int i = 0; i < MAX_BULLETS; i++) bullets[i].active = false;
 
         // Smooth difficulty curve:
         // - Level 1 starts with exactly 1 large asteroid.
@@ -224,11 +219,24 @@ private:
             const float sp = baseSpeed * randf(0.85f, 1.15f);
             const float vx = cosf(ang) * sp;
             const float vy = sinf(ang) * sp;
-            asteroids.emplace_back(ax, ay, vx, vy, 2 /*large*/);
+            // Allocate an asteroid slot.
+            for (int ai = 0; ai < MAX_ASTEROIDS; ai++) {
+                if (asteroids[ai].alive) continue;
+                Asteroid& a = asteroids[ai];
+                a.x = ax;
+                a.y = ay;
+                a.vx = vx;
+                a.vy = vy;
+                a.size = 2;
+                a.radius = 6;
+                a.alive = true;
+                a.color = COLOR_WHITE;
+                break;
+            }
         }
     }
 
-    void splitAsteroid(size_t idx, uint32_t now) {
+    void splitAsteroid(int idx, uint32_t now) {
         (void)now;
         Asteroid& a = asteroids[idx];
         a.alive = false;
@@ -248,12 +256,24 @@ private:
             const float sp = randf(0.35f, 0.65f);
             const float nvx = a.vx * 0.65f + cosf(ang) * sp;
             const float nvy = a.vy * 0.65f + sinf(ang) * sp;
-            asteroids.emplace_back(a.x, a.y, nvx, nvy, childSize);
+            for (int ai = 0; ai < MAX_ASTEROIDS; ai++) {
+                if (asteroids[ai].alive) continue;
+                Asteroid& c = asteroids[ai];
+                c.x = a.x;
+                c.y = a.y;
+                c.vx = nvx;
+                c.vy = nvy;
+                c.size = childSize;
+                c.radius = (childSize == 2) ? 6 : (childSize == 1) ? 4 : 2;
+                c.alive = true;
+                c.color = COLOR_WHITE;
+                break;
+            }
         }
     }
 
     bool allAsteroidsCleared() const {
-        for (const auto& a : asteroids) if (a.alive) return false;
+        for (int i = 0; i < MAX_ASTEROIDS; i++) if (asteroids[i].alive) return false;
         return true;
     }
 
@@ -273,7 +293,11 @@ private:
 
     void fire(uint32_t now) {
         if ((uint32_t)(now - lastShotMs) < SHOT_COOLDOWN_MS) return;
-        if ((int)bullets.size() >= MAX_BULLETS) return;
+        int slot = -1;
+        for (int i = 0; i < MAX_BULLETS; i++) {
+            if (!bullets[i].active) { slot = i; break; }
+        }
+        if (slot < 0) return;
 
         const float fx = cosf(ship.ang);
         const float fy = sinf(ship.ang);
@@ -281,8 +305,15 @@ private:
         // Spawn bullet slightly in front of the ship with inherited velocity.
         const float bx = ship.x + fx * 4.0f;
         const float by = ship.y + fy * 4.0f;
-        const float bv = 3.2f;
-        bullets.emplace_back(bx, by, ship.vx + fx * bv, ship.vy + fy * bv, now);
+        const float bv = BULLET_SPEED;
+        Bullet& b = bullets[slot];
+        b.x = bx;
+        b.y = by;
+        b.vx = ship.vx + fx * bv;
+        b.vy = ship.vy + fy * bv;
+        b.bornMs = now;
+        b.active = true;
+        b.color = COLOR_CYAN;
         lastShotMs = now;
     }
 
@@ -372,21 +403,19 @@ public:
         wrapY(ship.y);
 
         // 3) Bullets
-        for (auto it = bullets.begin(); it != bullets.end();) {
-            it->x += it->vx;
-            it->y += it->vy;
-            wrapX(it->x);
-            wrapY(it->y);
-
-            if ((uint32_t)(now - it->bornMs) > BULLET_LIFE_MS) {
-                it = bullets.erase(it);
-            } else {
-                ++it;
-            }
+        for (int bi = 0; bi < MAX_BULLETS; bi++) {
+            Bullet& b = bullets[bi];
+            if (!b.active) continue;
+            b.x += b.vx;
+            b.y += b.vy;
+            wrapX(b.x);
+            wrapY(b.y);
+            if ((uint32_t)(now - b.bornMs) > BULLET_LIFE_MS) b.active = false;
         }
 
         // 4) Asteroids
-        for (auto& a : asteroids) {
+        for (int ai = 0; ai < MAX_ASTEROIDS; ai++) {
+            Asteroid& a = asteroids[ai];
             if (!a.alive) continue;
             a.x += a.vx;
             a.y += a.vy;
@@ -395,32 +424,31 @@ public:
         }
 
         // 5) Bullet vs asteroid collisions
-        for (auto bIt = bullets.begin(); bIt != bullets.end();) {
-            bool hit = false;
-            for (size_t i = 0; i < asteroids.size(); i++) {
-                auto& a = asteroids[i];
+        for (int bi = 0; bi < MAX_BULLETS; bi++) {
+            Bullet& b = bullets[bi];
+            if (!b.active) continue;
+            for (int ai = 0; ai < MAX_ASTEROIDS; ai++) {
+                Asteroid& a = asteroids[ai];
                 if (!a.alive) continue;
                 const float r = (float)a.radius;
-                if (dist2(bIt->x, bIt->y, a.x, a.y) <= (r * r)) {
-                    splitAsteroid(i, now);
-                    hit = true;
+                if (dist2(b.x, b.y, a.x, a.y) <= (r * r)) {
+                    splitAsteroid(ai, now);
+                    b.active = false;
                     break;
                 }
             }
-
-            if (hit) bIt = bullets.erase(bIt);
-            else ++bIt;
         }
 
         // 6) Ship vs asteroid collisions (unless invulnerable)
         if ((int32_t)(invulnUntilMs - now) <= 0) {
-            for (const auto& a : asteroids) {
+            for (int ai = 0; ai < MAX_ASTEROIDS; ai++) {
+                const Asteroid& a = asteroids[ai];
                 if (!a.alive) continue;
                 const float r = (float)a.radius;
                 // Ship approximated as a small circle.
                 if (dist2(ship.x, ship.y, a.x, a.y) <= (r + 2.5f) * (r + 2.5f)) {
                     lives--;
-                    bullets.clear();
+                    for (int bi = 0; bi < MAX_BULLETS; bi++) bullets[bi].active = false;
 
                     if (lives <= 0) {
                         gameOver = true;
@@ -461,13 +489,16 @@ public:
         }
 
         // Asteroids
-        for (const auto& a : asteroids) {
+        for (int ai = 0; ai < MAX_ASTEROIDS; ai++) {
+            const Asteroid& a = asteroids[ai];
             if (!a.alive) continue;
             display->drawCircle((int)a.x, (int)a.y, (int)a.radius, a.color);
         }
 
         // Bullets
-        for (const auto& b : bullets) {
+        for (int bi = 0; bi < MAX_BULLETS; bi++) {
+            const Bullet& b = bullets[bi];
+            if (!b.active) continue;
             display->drawPixel((int)b.x, (int)b.y, b.color);
         }
 

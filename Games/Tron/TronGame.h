@@ -1,13 +1,14 @@
 #pragma once
 #include <Arduino.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include "GameBase.h"
-#include "ControllerManager.h"
-#include "config.h"
-#include "SmallFont.h"
-#include "Settings.h"
-#include "UserProfiles.h"
-#include "GameOverLeaderboardView.h"
+#include "../../GameBase.h"
+#include "../../ControllerManager.h"
+#include "../../config.h"
+#include "../../SmallFont.h"
+#include "../../Settings.h"
+#include "../../UserProfiles.h"
+#include "../../GameOverLeaderboardView.h"
+#include "TronGameConfig.h"
 
 /**
  * TronGame - Classic Tron / Light-Cycles
@@ -31,33 +32,33 @@ private:
     // ---------------------------------------------------------
     // Layout (match Snake's "inset border + HUD" concept)
     // ---------------------------------------------------------
-    static constexpr int HUD_H = 8;                 // reserve top for HUD
-    static constexpr int CELL_PX = 1;               // 1px wide trails (classic Tron look)
-    static constexpr int BORDER_INSET_X = 1;        // avoid edge pixels
-    static constexpr int BORDER_INSET_Y = 1;        // 1px gap below HUD
-    static constexpr int BORDER_INSET_BOTTOM = 1;   // avoid last row
+    static constexpr int HUD_H = TronGameConfig::HUD_H;                 // reserve top for HUD
+    static constexpr int CELL_PX = TronGameConfig::CELL_PX;             // 1px wide trails (classic Tron look)
+    static constexpr int BORDER_INSET_X = TronGameConfig::BORDER_INSET_X;      // avoid edge pixels
+    static constexpr int BORDER_INSET_Y = TronGameConfig::BORDER_INSET_Y;      // 1px gap below HUD
+    static constexpr int BORDER_INSET_BOTTOM = TronGameConfig::BORDER_INSET_BOTTOM; // avoid last row
 
     // Border rectangle (in pixels)
-    static constexpr int BORDER_X = BORDER_INSET_X;
-    static constexpr int BORDER_Y = HUD_H + BORDER_INSET_Y;
-    static constexpr int BORDER_W = PANEL_RES_X - (BORDER_INSET_X * 2);
-    static constexpr int BORDER_H = (PANEL_RES_Y - BORDER_Y) - BORDER_INSET_BOTTOM;
+    static constexpr int BORDER_X = TronGameConfig::BORDER_X;
+    static constexpr int BORDER_Y = TronGameConfig::BORDER_Y;
+    static constexpr int BORDER_W = TronGameConfig::BORDER_W;
+    static constexpr int BORDER_H = TronGameConfig::BORDER_H;
 
     // Content area inside border (1px thickness)
-    static constexpr int CONTENT_X = BORDER_X + 1;
-    static constexpr int CONTENT_Y = BORDER_Y + 1;
-    static constexpr int CONTENT_W = BORDER_W - 2;
-    static constexpr int CONTENT_H = BORDER_H - 2;
+    static constexpr int CONTENT_X = TronGameConfig::CONTENT_X;
+    static constexpr int CONTENT_Y = TronGameConfig::CONTENT_Y;
+    static constexpr int CONTENT_W = TronGameConfig::CONTENT_W;
+    static constexpr int CONTENT_H = TronGameConfig::CONTENT_H;
 
     // Logical grid (cells)
-    static constexpr int GRID_W = (CONTENT_W / CELL_PX);
-    static constexpr int GRID_H = (CONTENT_H / CELL_PX);
+    static constexpr int GRID_W = TronGameConfig::GRID_W;
+    static constexpr int GRID_H = TronGameConfig::GRID_H;
 
     // ---------------------------------------------------------
     // Game rules / pacing
     // ---------------------------------------------------------
-    static constexpr uint8_t WIN_SCORE = 5;
-    static constexpr uint32_t ROUND_RESET_DELAY_MS = 1200;
+    static constexpr uint8_t WIN_SCORE = TronGameConfig::WIN_SCORE;
+    static constexpr uint32_t ROUND_RESET_DELAY_MS = TronGameConfig::ROUND_RESET_DELAY_MS;
 
     enum class Dir : uint8_t { Up, Down, Left, Right };
 
