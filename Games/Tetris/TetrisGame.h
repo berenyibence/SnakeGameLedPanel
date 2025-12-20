@@ -1,13 +1,15 @@
 #pragma once
 #include <Arduino.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include "../../GameBase.h"
-#include "../../ControllerManager.h"
-#include "../../config.h"
-#include "../../SmallFont.h"
-#include "../../UserProfiles.h"
-#include "../../GameOverLeaderboardView.h"
+#include "../../engine/GameBase.h"
+#include "../../engine/ControllerManager.h"
+#include "../../engine/config.h"
+#include "../../engine/AudioManager.h"
+#include "../../component/SmallFont.h"
+#include "../../engine/UserProfiles.h"
+#include "../../component/GameOverLeaderboardView.h"
 #include "TetrisGameConfig.h"
+#include "TetrisGameAudio.h"
 
 /**
  * TetrisGame - Classic Tetris game
@@ -365,6 +367,14 @@ public:
 
         // Clear particles
         for (int i = 0; i < MAX_PARTICLES; i++) particles[i].active = false;
+
+        // -----------------------------------------------------
+        // Audio: play the "starting song" once (RTTTL, non-blocking)
+        // -----------------------------------------------------
+        // This is intentionally minimal: we play on start/reset and stop any
+        // leftover ringtone from other applets (e.g. MusicApp).
+        globalAudio.stopRtttl();
+        globalAudio.playRtttl(TetrisGameAudio::MUSIC_START_RTTTL, /*loop=*/false);
     }
 
     void reset() override {

@@ -8,7 +8,7 @@
 // -----------------------------------------------------------------------------
 #pragma once
 
-#include "../../config.h" // COLOR_* constants
+#include "../../engine/config.h" // COLOR_* constants
 
 // Tetris pieces (Tetrominoes) - 7 types.
 // Keep the table identical to the original `TetrisGame.h` definitions to avoid

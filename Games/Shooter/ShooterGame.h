@@ -1,14 +1,16 @@
 #pragma once
 #include <Arduino.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include "../../GameBase.h"
-#include "../../ControllerManager.h"
-#include "../../config.h"
-#include "../../SmallFont.h"
-#include "../../Settings.h"
-#include "../../UserProfiles.h"
-#include "../../GameOverLeaderboardView.h"
+#include "../../engine/GameBase.h"
+#include "../../engine/ControllerManager.h"
+#include "../../engine/config.h"
+#include "../../engine/AudioManager.h"
+#include "../../component/SmallFont.h"
+#include "../../engine/Settings.h"
+#include "../../engine/UserProfiles.h"
+#include "../../component/GameOverLeaderboardView.h"
 #include "ShooterGameConfig.h"
+#include "ShooterGameAudio.h"
 
 /**
  * ShooterGame - Space shooter game
@@ -39,6 +41,16 @@ private:
         static auto r2(T* c, int) -> decltype(c->r2(), bool()) { return (bool)c->r2(); }
         template <typename T>
         static bool r2(T*, ...) { return false; }
+
+        template <typename T>
+        static auto btnX(T* c, int) -> decltype(c->x(), bool()) { return (bool)c->x(); }
+        template <typename T>
+        static bool btnX(T*, ...) { return false; }
+
+        template <typename T>
+        static auto btnY(T* c, int) -> decltype(c->y(), bool()) { return (bool)c->y(); }
+        template <typename T>
+        static bool btnY(T*, ...) { return false; }
     };
 
     static inline float clampf(float v, float lo, float hi) { return (v < lo) ? lo : (v > hi) ? hi : v; }
@@ -47,6 +59,42 @@ private:
         if (a <= dz) return 0.0f;
         const float s = (a - dz) / (1.0f - dz);
         return (v < 0) ? -s : s;
+    }
+
+    // ---------------------------------------------------------
+    // Audio helpers (buzzer via engine/AudioManager)
+    // ---------------------------------------------------------
+    static inline bool sfxAllowedNow() {
+        // Avoid consuming cooldown timers while Sound is OFF or volume is muted.
+        return globalSettings.isSoundEnabled() && globalSettings.getSoundVolumeLevel() > 0;
+    }
+
+    static inline void playSfxPatternCooldown(
+        const AudioManager::Step* steps,
+        uint8_t stepCount,
+        uint16_t cooldownMs,
+        uint32_t now,
+        uint32_t& lastMs
+    ) {
+        if (!steps || stepCount == 0) return;
+        if (!sfxAllowedNow()) return;
+        if ((int32_t)(now - lastMs) < (int32_t)cooldownMs) return;
+        lastMs = now;
+        globalAudio.playPattern(steps, stepCount);
+    }
+
+    static inline void playSfxToneCooldown(
+        uint16_t freqHz,
+        uint16_t durationMs,
+        uint16_t cooldownMs,
+        uint32_t now,
+        uint32_t& lastMs
+    ) {
+        if (freqHz == 0 || durationMs == 0) return;
+        if (!sfxAllowedNow()) return;
+        if ((int32_t)(now - lastMs) < (int32_t)cooldownMs) return;
+        lastMs = now;
+        globalAudio.playTone(freqHz, durationMs);
     }
 
     // HUD band (keep gameplay below it)
@@ -249,11 +297,31 @@ private:
     static constexpr uint32_t SPAWN_INTERVAL_MS = ShooterGameConfig::ENEMY_SPAWN_INTERVAL_MS;
     uint32_t spawnPauseUntilMs = 0; // post-boss grace time to pick up loot
 
+    // SFX throttling state
+    struct SfxState {
+        uint32_t lastShootMs = 0;
+        uint32_t lastRocketMs = 0;
+        uint32_t lastEnemyKillMs = 0;
+        uint32_t lastPickupMs = 0;
+        uint32_t lastPlayerHitMs = 0;
+        uint32_t lastBossDeathMs = 0;
+        uint32_t lastGameOverMs = 0;
+    } sfx;
+
     // Powerup timers (ms)
     uint32_t shieldUntilMs = 0;
     uint32_t weaponUntilMs = 0;
     uint8_t shieldTier = 0;  // 0=none, 1..10
     uint8_t weaponTier = 0;  // 0=none, 1..5
+    uint32_t cyanUntilMs = 0; // cyan "fun" effect timer (meaning depends on config)
+    uint8_t cyanTier = 0;     // cyan tier 0..5 (used by MAGNET, also reused for other cyan kinds)
+
+    // Dev cheat: YYYXXX (disables leaderboard submission for this run).
+    bool devCheatUsed = false;
+    uint8_t cheatIdx = 0;
+    uint32_t lastCheatInputMs = 0;
+    bool lastXBtn = false;
+    bool lastYBtn = false;
 
     // Tier durations (seconds): 10,20,30,40,50
     static inline uint32_t tierDurationMs(uint8_t tier) {
@@ -467,6 +535,23 @@ private:
         return (x >= rx && x < rx + rw && y >= ry && y < ry + rh);
     }
 
+    static inline int centeredPipXWithGap(int centerX, int count, int idx) {
+        // Center pips around centerX.
+        // If `count` is even, leave a 1px hole at centerX to keep the group visually centered:
+        //   count=4 => [center-2, center-1, (gap), center+1, center+2]
+        // If `count` is odd, pips are contiguous:
+        //   count=5 => [center-2, center-1, center, center+1, center+2]
+        if (count <= 0) return centerX;
+        if (count & 1) {
+            // Odd => contiguous
+            return centerX - (count / 2) + idx;
+        }
+        // Even => split into two halves, skipping centerX
+        const int half = count / 2;
+        if (idx < half) return (centerX - half) + idx;
+        return (centerX + 1) + (idx - half);
+    }
+
     static inline uint16_t dimColor(MatrixPanel_I2S_DMA* d, uint16_t c, uint8_t mul /*0..255*/) {
         // Approximate RGB565 dimming by scaling 5/6/5 channels.
         uint8_t r = (uint8_t)((c >> 11) & 0x1F);
@@ -501,6 +586,14 @@ private:
         bossDeathCx = (int)boss.x + (int)(BOSS_W / 2);
         bossDeathCy = (int)boss.y + (int)(BOSS_H / 2);
         clearBossProjectiles(); // fairness: clear boss bullets/rockets
+
+        playSfxPatternCooldown(
+            ShooterGameAudio::SFX_BOSS_DEATH,
+            ShooterGameAudio::SFX_BOSS_DEATH_N,
+            ShooterGameConfig::SFX_BOSS_DEATH_COOLDOWN_MS,
+            now,
+            sfx.lastBossDeathMs
+        );
 
         // Pause enemy spawning for the whole death sequence + extra loot grace.
         // (2s explosion + 1s pickup time)
@@ -556,6 +649,16 @@ private:
         }
     }
 
+    static inline void shuffleU8(uint8_t* a, int n) {
+        // Fisher–Yates shuffle (uniform), using Arduino's random().
+        for (int i = n - 1; i > 0; i--) {
+            const int j = (int)random(0, i + 1);
+            const uint8_t tmp = a[i];
+            a[i] = a[j];
+            a[j] = tmp;
+        }
+    }
+
     void updateBossDeath(uint32_t now) {
         if (!bossDeathActive) return;
         static constexpr uint32_t LIFE_MS = ShooterGameConfig::BOSS_DEATH_EXPLOSION_MS;
@@ -564,14 +667,42 @@ private:
 
         if (!bossLootSpawned) {
             bossLootSpawned = true;
-            // Spawn one of each loot (blue/red/green) shooting out in different directions.
+            // Spawn one of each loot (blue/red/green/purple), but randomize the fan-out so
+            // the pattern doesn't look identical every boss kill.
             // type: 0=shield(blue), 1=weapon(red), 2=life(green), 3=rockets(purple)
             const float x = (float)bossDeathCx;
             const float y = (float)bossDeathCy;
-            spawnPowerupForced(0, x, y, -0.75f, -0.10f);
-            spawnPowerupForced(1, x, y,  0.00f, -0.14f);
-            spawnPowerupForced(2, x, y,  0.75f, -0.10f);
-            spawnPowerupForced(3, x, y,  0.00f, -0.06f);
+
+            // Shuffle loot types so the same item isn't always tied to the same trajectory.
+            uint8_t types[4] = { 0, 1, 2, 3 };
+            shuffleU8(types, 4);
+
+            // Build a symmetric set of base X velocities, then shuffle them so the overall
+            // pattern varies run-to-run even before jitter.
+            const float s = ShooterGameConfig::BOSS_LOOT_VX_SPREAD;
+            float baseVx[4] = { -s, -0.35f * s, 0.35f * s, s };
+            // Shuffle baseVx by shuffling indices (keep code tiny, avoid templates).
+            uint8_t idx[4] = { 0, 1, 2, 3 };
+            shuffleU8(idx, 4);
+
+            for (int i = 0; i < 4; i++) {
+                // Small spawn position jitter so packs don't stack perfectly.
+                const float ox = ((float)random(-100, 101) / 100.0f) * ShooterGameConfig::BOSS_LOOT_POS_JITTER_PX;
+                const float oy = ((float)random(-100, 101) / 100.0f) * ShooterGameConfig::BOSS_LOOT_POS_JITTER_PX;
+
+                // Randomized kick:
+                // - VX: symmetric fan-out + per-item jitter (clamped to match powerup safety).
+                // - VY: random upward kick within [min..max] plus a tiny jitter.
+                float vx = baseVx[idx[i]] + ((float)random(-100, 101) / 100.0f) * ShooterGameConfig::BOSS_LOOT_VX_JITTER;
+                float vy = ShooterGameConfig::BOSS_LOOT_VY_BASE_MIN +
+                           ((float)random(0, 101) / 100.0f) * (ShooterGameConfig::BOSS_LOOT_VY_BASE_MAX - ShooterGameConfig::BOSS_LOOT_VY_BASE_MIN);
+                vy += ((float)random(-100, 101) / 100.0f) * ShooterGameConfig::BOSS_LOOT_VY_JITTER;
+
+                vx = clampf(vx, -0.85f, 0.85f);
+                vy = clampf(vy, -0.85f, 0.85f);
+
+                spawnPowerupForced(types[i], x + ox, y + oy, vx, vy);
+            }
         }
 
         // End the death sequence once loot is spawned.
@@ -583,6 +714,16 @@ private:
         playerDeathStartMs = now;
         playerDeathCx = (int)player.x + (int)(SHIP_W / 2);
         playerDeathCy = (int)player.y + (int)(SHIP_H / 2);
+
+        // Game over sting (throttled so it doesn't repeat if called twice by mistake).
+        playSfxPatternCooldown(
+            ShooterGameAudio::SFX_BOSS_DEATH,
+            ShooterGameAudio::SFX_BOSS_DEATH_N,
+            ShooterGameConfig::SFX_BOSS_DEATH_COOLDOWN_MS,
+            now,
+            sfx.lastGameOverMs
+        );
+
         // Clear bullets for readability during the final explosion.
         clearBullets();
         clearBossProjectiles();
@@ -796,6 +937,15 @@ private:
             phaseStartMs = now;
             return;
         }
+
+        playSfxPatternCooldown(
+            ShooterGameAudio::SFX_PLAYER_HIT,
+            ShooterGameAudio::SFX_PLAYER_HIT_N,
+            ShooterGameConfig::SFX_PLAYER_HIT_COOLDOWN_MS,
+            now,
+            sfx.lastPlayerHitMs
+        );
+
         // Brief invulnerability so you don't get instantly chain-hit.
         invulnUntilMs = now + 900;
     }
@@ -811,7 +961,7 @@ private:
     static constexpr float POWERUP_BOUNCE = ShooterGameConfig::POWERUP_BOUNCE;
     static constexpr int POWERUP_SIZE_PX = ShooterGameConfig::POWERUP_SIZE_PX; // drawn as 2x2 box
 
-    void spawnPlayerBullet(int x, int y) {
+    void spawnPlayerBullet(int x, int y, uint16_t color, uint8_t dmg) {
         for (int i = 0; i < MAX_PLAYER_BULLETS; i++) {
             if (playerBullets[i].active) continue;
             playerBullets[i].active = true;
@@ -819,18 +969,9 @@ private:
             playerBullets[i].y = (float)y;
             playerBullets[i].vx = 0.0f;
             playerBullets[i].vy = -ShooterGameConfig::PLAYER_BULLET_SPEED;
-            // Weapon tier determines bullet pattern, color and damage.
-            const uint32_t now = millis();
-            const bool weaponActive = ((int32_t)(weaponUntilMs - now) > 0);
-            const uint8_t t = weaponActive ? weaponTier : 0;
-            if (t == 2 || t == 5 || t == 4) playerBullets[i].color = COLOR_RED;
-            else playerBullets[i].color = COLOR_CYAN;
-
-            // Damage: tier1=1, tier2=2, tier3=1/shot, tier4 center=2 sides=1, tier5=2/shot
-            // Default (tier0): same as tier1 (1 dmg).
-            if (t == 2 || t == 5) playerBullets[i].dmg = 2;
-            else if (t == 4) playerBullets[i].dmg = 1; // overridden by caller for center bullet
-            else playerBullets[i].dmg = 1;
+            // Color/damage are decided by the firing logic so we can support mixed-color spreads.
+            playerBullets[i].color = color;
+            playerBullets[i].dmg = max<uint8_t>(1, dmg);
             return;
         }
     }
@@ -1082,13 +1223,32 @@ private:
         }
         if (slot < 0) return;
 
-        // Choose type (bias towards life if low).
-        uint8_t t = 0;
-        const int r = random(0, 100);
-        if (lives < 5 && r < 28) t = 2;          // green life
-        else if (r < 52) t = 0;                 // blue shield
-        else if (r < 82) t = 1;                 // red weapon
-        else t = 3;                              // purple rockets
+        // Choose type by weights (config-driven).
+        // NOTE: White is intentionally only available from normal drops (this function),
+        // never from boss guaranteed loot.
+        const int total =
+            (int)ShooterGameConfig::DROP_W_BLUE +
+            (int)ShooterGameConfig::DROP_W_RED +
+            (int)ShooterGameConfig::DROP_W_GREEN +
+            (int)ShooterGameConfig::DROP_W_PURPLE +
+            (int)ShooterGameConfig::DROP_W_YELLOW +
+            (int)ShooterGameConfig::DROP_W_CYAN +
+            (int)ShooterGameConfig::DROP_W_WHITE;
+        const int r = (total > 0) ? random(0, total) : 0;
+        int acc = 0;
+        uint8_t t = ShooterGameConfig::POWERUP_SHIELD_BLUE;
+        acc += (int)ShooterGameConfig::DROP_W_BLUE;   if (r < acc) t = ShooterGameConfig::POWERUP_SHIELD_BLUE;
+        acc += (int)ShooterGameConfig::DROP_W_RED;    if (r >= acc - (int)ShooterGameConfig::DROP_W_RED && r < acc) t = ShooterGameConfig::POWERUP_WEAPON_RED;
+        acc += (int)ShooterGameConfig::DROP_W_GREEN;  if (r >= acc - (int)ShooterGameConfig::DROP_W_GREEN && r < acc) t = ShooterGameConfig::POWERUP_LIFE_GREEN;
+        acc += (int)ShooterGameConfig::DROP_W_PURPLE; if (r >= acc - (int)ShooterGameConfig::DROP_W_PURPLE && r < acc) t = ShooterGameConfig::POWERUP_ROCKET_PURPLE;
+        acc += (int)ShooterGameConfig::DROP_W_YELLOW; if (r >= acc - (int)ShooterGameConfig::DROP_W_YELLOW && r < acc) t = ShooterGameConfig::POWERUP_POINTS_YELLOW;
+        acc += (int)ShooterGameConfig::DROP_W_CYAN;   if (r >= acc - (int)ShooterGameConfig::DROP_W_CYAN && r < acc) t = ShooterGameConfig::POWERUP_FUN_CYAN;
+        acc += (int)ShooterGameConfig::DROP_W_WHITE;  if (r >= acc - (int)ShooterGameConfig::DROP_W_WHITE && r < acc) t = ShooterGameConfig::POWERUP_BUNDLE_WHITE;
+
+        // If we're already at max lives, never drop green; swap to yellow instead.
+        if (t == ShooterGameConfig::POWERUP_LIFE_GREEN && lives >= (int)ShooterGameConfig::PLAYER_MAX_LIVES) {
+            t = ShooterGameConfig::POWERUP_POINTS_YELLOW;
+        }
 
         powerups[slot].active = true;
         powerups[slot].x = x;
@@ -1102,19 +1262,58 @@ private:
     }
 
     void applyPowerup(uint8_t type, uint32_t now) {
-        if (type == 0) { // Blue Pack (shield tier)
+        if (type == ShooterGameConfig::POWERUP_SHIELD_BLUE) { // Blue Pack (shield tier)
             if ((int32_t)(shieldUntilMs - now) > 0) shieldTier = min<uint8_t>(10, (uint8_t)(shieldTier + 1));
             else shieldTier = 1;
             shieldUntilMs = now + tierDurationMs(shieldTier);
-        } else if (type == 1) { // Red Pack (weapon tier)
+        } else if (type == ShooterGameConfig::POWERUP_WEAPON_RED) { // Red Pack (weapon tier)
             if ((int32_t)(weaponUntilMs - now) > 0) weaponTier = min<uint8_t>(5, weaponTier + 1);
             else weaponTier = 1;
             // Weapon tiers remain 1..5 even though tierDurationMs() supports shield tiers up to 10.
             weaponUntilMs = now + tierDurationMs((uint8_t)min<uint8_t>(5, weaponTier));
-        } else if (type == 2) { // Green pack: +life (no tiers)
+        } else if (type == ShooterGameConfig::POWERUP_LIFE_GREEN) { // Green pack: +life (no tiers)
             lives = min((int)ShooterGameConfig::PLAYER_MAX_LIVES, lives + 1);
-        } else { // Purple pack: +rocket ammo (max 2)
+        } else if (type == ShooterGameConfig::POWERUP_ROCKET_PURPLE) { // Purple pack: +rocket ammo (max 2)
             rocketAmmo = min<uint8_t>(ShooterGameConfig::PLAYER_MAX_ROCKET_AMMO, (uint8_t)(rocketAmmo + 1));
+        } else if (type == ShooterGameConfig::POWERUP_POINTS_YELLOW) { // Yellow pack: points only
+            // Add points with small randomness so pickups feel rewarding.
+            const int base = (int)ShooterGameConfig::YELLOW_POINTS_BASE + (int)ShooterGameConfig::YELLOW_POINTS_PER_LEVEL * max(1, level);
+            const int jit = (int)ShooterGameConfig::YELLOW_POINTS_JITTER;
+            const int add = base + random(-jit, jit + 1);
+            score += max(1, add);
+        } else if (type == ShooterGameConfig::POWERUP_FUN_CYAN) { // Cyan pack: configurable fun powerup
+            // 0..4 behavior selected in ShooterGameConfig::CYAN_POWERUP_KIND.
+            if (ShooterGameConfig::CYAN_POWERUP_KIND == 3) {
+                // SMART_BOMB: instant effect (no timer needed).
+                // Kill all normal enemies and clear enemy bullets for readability.
+                for (int i = 0; i < MAX_ENEMIES; i++) {
+                    Enemy& e = enemies[i];
+                    if (!e.alive) continue;
+                    const int ex = (int)e.x + (int)(ENEMY_W / 2);
+                    const int ey = (int)e.y + (int)(ENEMY_H / 2);
+                    e.alive = false;
+                    kills++;
+                    const int mult = (ShooterGameConfig::CYAN_POWERUP_KIND == 4 && (int32_t)(cyanUntilMs - now) > 0) ? (int)ShooterGameConfig::CYAN_SCORE_MULT : 1;
+                    score += mult * (10 + (e.type * 5));
+                    spawnExplosion(ex, ey, COLOR_WHITE, now);
+                    spawnParticles((float)ex, (float)ey, COLOR_CYAN, 10, now);
+                }
+                for (int i = 0; i < MAX_ENEMY_BULLETS; i++) enemyBullets[i].active = false;
+            } else {
+                // Tiered duration (match the red/shield feel): picking up another cyan increases tier.
+                // Tier caps at 5.
+                if ((int32_t)(cyanUntilMs - now) > 0) cyanTier = min<uint8_t>(ShooterGameConfig::CYAN_TIER_MAX, (uint8_t)(cyanTier + 1));
+                else cyanTier = 1;
+                cyanUntilMs = now + tierDurationMs((uint8_t)min<uint8_t>(ShooterGameConfig::CYAN_TIER_MAX, cyanTier));
+            }
+        } else if (type == ShooterGameConfig::POWERUP_BUNDLE_WHITE) { // White pack: one of each other loot (rare)
+            // Apply one tier of each primary loot (plus points and cyan).
+            applyPowerup(ShooterGameConfig::POWERUP_SHIELD_BLUE, now);
+            applyPowerup(ShooterGameConfig::POWERUP_WEAPON_RED, now);
+            applyPowerup(ShooterGameConfig::POWERUP_LIFE_GREEN, now);
+            applyPowerup(ShooterGameConfig::POWERUP_ROCKET_PURPLE, now);
+            applyPowerup(ShooterGameConfig::POWERUP_POINTS_YELLOW, now);
+            applyPowerup(ShooterGameConfig::POWERUP_FUN_CYAN, now);
         }
     }
 
@@ -1144,6 +1343,20 @@ private:
         // Powerups
         for (int i = 0; i < MAX_POWERUPS; i++) {
             if (!powerups[i].active) continue;
+            // Cyan MAGNET powerup: attract all powerups toward the ship.
+            if (ShooterGameConfig::CYAN_POWERUP_KIND == 0 && cyanTier > 0 && (int32_t)(cyanUntilMs - now) > 0) {
+                const float tx = player.x + (float)SHIP_W * 0.5f;
+                const float ty = player.y + (float)SHIP_H * 0.5f;
+                const float dx = tx - powerups[i].x;
+                const float dy = ty - powerups[i].y;
+                // Tiered attraction: tier 0 -> no attraction, tier 5 -> very strong
+                // (slightly stronger than gravity; see config).
+                const float tier01 = (float)min<uint8_t>(ShooterGameConfig::CYAN_TIER_MAX, cyanTier) / (float)max<uint8_t>(1, ShooterGameConfig::CYAN_TIER_MAX);
+                const float amax = ShooterGameConfig::CYAN_MAGNET_ACCEL_MAX_AT_TIER5 * tier01;
+                const float k = ShooterGameConfig::CYAN_MAGNET_K_AT_TIER5 * tier01;
+                powerups[i].vx += clampf(dx * k, -amax, amax);
+                powerups[i].vy += clampf(dy * k, -amax, amax);
+            }
             // Ballistic motion (kick + gravity + drag) + wall bounces.
             powerups[i].x += powerups[i].vx;
             powerups[i].y += powerups[i].vy;
@@ -1181,11 +1394,32 @@ private:
                 powerups[i].x <= (float)(px + SHIP_W)) {
                 // Pickup sparkle (colored by pack).
                 const uint16_t c =
-                    (powerups[i].type == 0) ? COLOR_BLUE :
-                    (powerups[i].type == 1) ? COLOR_RED :
-                    (powerups[i].type == 2) ? COLOR_GREEN :
-                    COLOR_PURPLE;
+                    (powerups[i].type == ShooterGameConfig::POWERUP_SHIELD_BLUE) ? COLOR_BLUE :
+                    (powerups[i].type == ShooterGameConfig::POWERUP_WEAPON_RED) ? COLOR_RED :
+                    (powerups[i].type == ShooterGameConfig::POWERUP_LIFE_GREEN) ? COLOR_GREEN :
+                    (powerups[i].type == ShooterGameConfig::POWERUP_ROCKET_PURPLE) ? COLOR_PURPLE :
+                    (powerups[i].type == ShooterGameConfig::POWERUP_POINTS_YELLOW) ? COLOR_YELLOW :
+                    (powerups[i].type == ShooterGameConfig::POWERUP_FUN_CYAN) ? COLOR_CYAN :
+                    COLOR_WHITE;
                 spawnParticles(powerups[i].x + 1.0f, powerups[i].y + 1.0f, c, 10, now);
+
+                // Pickup SFX (type-specific).
+                if (powerups[i].type == ShooterGameConfig::POWERUP_SHIELD_BLUE) {
+                    playSfxPatternCooldown(ShooterGameAudio::SFX_PICKUP_BLUE, ShooterGameAudio::SFX_PICKUP_BLUE_N, ShooterGameConfig::SFX_PICKUP_COOLDOWN_MS, now, sfx.lastPickupMs);
+                } else if (powerups[i].type == ShooterGameConfig::POWERUP_WEAPON_RED) {
+                    playSfxPatternCooldown(ShooterGameAudio::SFX_PICKUP_RED, ShooterGameAudio::SFX_PICKUP_RED_N, ShooterGameConfig::SFX_PICKUP_COOLDOWN_MS, now, sfx.lastPickupMs);
+                } else if (powerups[i].type == ShooterGameConfig::POWERUP_LIFE_GREEN) {
+                    playSfxPatternCooldown(ShooterGameAudio::SFX_PICKUP_GREEN, ShooterGameAudio::SFX_PICKUP_GREEN_N, ShooterGameConfig::SFX_PICKUP_COOLDOWN_MS, now, sfx.lastPickupMs);
+                } else if (powerups[i].type == ShooterGameConfig::POWERUP_POINTS_YELLOW) {
+                    playSfxPatternCooldown(ShooterGameAudio::SFX_PICKUP_YELLOW, ShooterGameAudio::SFX_PICKUP_YELLOW_N, ShooterGameConfig::SFX_PICKUP_COOLDOWN_MS, now, sfx.lastPickupMs);
+                } else if (powerups[i].type == ShooterGameConfig::POWERUP_FUN_CYAN) {
+                    playSfxPatternCooldown(ShooterGameAudio::SFX_PICKUP_CYAN, ShooterGameAudio::SFX_PICKUP_CYAN_N, ShooterGameConfig::SFX_PICKUP_COOLDOWN_MS, now, sfx.lastPickupMs);
+                } else if (powerups[i].type == ShooterGameConfig::POWERUP_BUNDLE_WHITE) {
+                    playSfxPatternCooldown(ShooterGameAudio::SFX_PICKUP_WHITE, ShooterGameAudio::SFX_PICKUP_WHITE_N, ShooterGameConfig::SFX_PICKUP_COOLDOWN_MS, now, sfx.lastPickupMs);
+                } else {
+                    playSfxPatternCooldown(ShooterGameAudio::SFX_PICKUP_PURPLE, ShooterGameAudio::SFX_PICKUP_PURPLE_N, ShooterGameConfig::SFX_PICKUP_COOLDOWN_MS, now, sfx.lastPickupMs);
+                }
+
                 applyPowerup(powerups[i].type, now);
                 powerups[i].active = false;
                 continue;
@@ -1288,7 +1522,8 @@ private:
                 e.alive = false;
                 hitsThisLevel = (uint16_t)min<uint32_t>(65535u, (uint32_t)hitsThisLevel + (uint32_t)hpBefore);
                 kills++;
-                score += 10 + (e.type * 5);
+                const int mult = (ShooterGameConfig::CYAN_POWERUP_KIND == 4 && (int32_t)(cyanUntilMs - now) > 0) ? (int)ShooterGameConfig::CYAN_SCORE_MULT : 1;
+                score += mult * (10 + (e.type * 5));
 
                 const int ex = (int)e.x + (int)(ENEMY_W / 2);
                 const int ey = (int)e.y + (int)(ENEMY_H / 2);
@@ -1331,7 +1566,14 @@ private:
                     if (boss.hp == 0) {
                         // Boss defeated: start huge explosion sequence (2 seconds),
                         // then guaranteed loot spawns at the end.
-                        score += 250 + (int)bossesDefeated * 25;
+                    {
+                        const int mult = (ShooterGameConfig::CYAN_POWERUP_KIND == 4 && (int32_t)(cyanUntilMs - now) > 0) ? (int)ShooterGameConfig::CYAN_SCORE_MULT : 1;
+                        score += mult * (250 + (int)bossesDefeated * 25);
+                    }
+                        {
+                            const int mult = (ShooterGameConfig::CYAN_POWERUP_KIND == 4 && (int32_t)(cyanUntilMs - now) > 0) ? (int)ShooterGameConfig::CYAN_SCORE_MULT : 1;
+                            score += mult * (250 + (int)bossesDefeated * 25);
+                        }
                         bossesDefeated++;
                         level++;                 // boss kill => next level (requested)
                         hitsThisLevel = 0;       // reset hits for the new level
@@ -1367,19 +1609,34 @@ private:
                     if (e.hp == 0) {
                         e.alive = false;
                         kills++;
-                        score += 10 + (e.type * 5);
+                        {
+                            const int mult = (ShooterGameConfig::CYAN_POWERUP_KIND == 4 && (int32_t)(cyanUntilMs - now) > 0) ? (int)ShooterGameConfig::CYAN_SCORE_MULT : 1;
+                            score += mult * (10 + (e.type * 5));
+                        }
                         // Explosion + powerup kick
                         const int ex = (int)e.x + (int)(ENEMY_W / 2);
                         const int ey = (int)e.y + (int)(ENEMY_H / 2);
                         spawnExplosion(ex, ey, ShooterGameConfig::ENEMY_COLORS[e.type & 3], now);
                         // Extra sparkle burst (Breakout-style debris).
                         spawnParticles((float)ex, (float)ey, ShooterGameConfig::ENEMY_COLORS[e.type & 3], 12, now);
+
+                        playSfxPatternCooldown(
+                            ShooterGameAudio::SFX_ENEMY_KILL,
+                            ShooterGameAudio::SFX_ENEMY_KILL_N,
+                            ShooterGameConfig::SFX_ENEMY_KILL_COOLDOWN_MS,
+                            now,
+                            sfx.lastEnemyKillMs
+                        );
+
                         // Powerup kick: stronger sideways randomness, slight upward.
                         const float kickVx = ((float)random(-100, 101) / 100.0f) * 0.70f; // ~-0.70..0.70
                         const float kickVy = -(((float)random(20, 80) / 100.0f) * 0.10f);  // ~-0.02..-0.08
                         maybeDropPowerup(e.x + 1.0f, e.y + 2.0f, kickVx, kickVy);
                     }
-                    b.active = false;
+                    // Cyan PIERCING: bullet stays alive after hitting an enemy (but still only hits 1 enemy per tick).
+                    if (!(ShooterGameConfig::CYAN_POWERUP_KIND == 1 && (int32_t)(cyanUntilMs - now) > 0)) {
+                        b.active = false;
+                    }
                     break;
                 }
             }
@@ -1470,7 +1727,7 @@ private:
         // ---------------------------------------------------------
         // Boss projectiles vs player (stars + rockets)
         // ---------------------------------------------------------
-        auto tryHitPlayer = [&](float fx, float fy, bool& activeFlag) {
+        auto tryHitPlayerShielded = [&](float fx, float fy, bool& activeFlag) {
             const int ix = (int)fx;
             const int iy = (int)fy;
 
@@ -1499,15 +1756,29 @@ private:
             }
         };
 
+        // Red stars (boss star ammo) should NOT collide with the shield (requested).
+        // They only damage on direct ship collision, and always take lives (shield ignored).
+        auto tryHitPlayerNoShield = [&](float fx, float fy, bool& activeFlag) {
+            const int ix = (int)fx;
+            const int iy = (int)fy;
+            if (!rectContains(ix, iy, px, py, SHIP_W, SHIP_H)) return;
+            activeFlag = false;
+            if (!invuln) {
+                spawnExplosion(cx, cy, COLOR_ORANGE, now);
+                // Direct life hit: ignore shield tiers completely.
+                loseLife(now);
+            }
+        };
+
         for (int i = 0; i < MAX_STAR_SHOTS; i++) {
             if (!starShots[i].active) continue;
             bool& a = starShots[i].active;
-            tryHitPlayer(starShots[i].x, starShots[i].y, a);
+            tryHitPlayerNoShield(starShots[i].x, starShots[i].y, a);
         }
         for (int i = 0; i < MAX_ROCKETS; i++) {
             if (!rockets[i].active) continue;
             bool& a = rockets[i].active;
-            tryHitPlayer(rockets[i].x, rockets[i].y, a);
+            tryHitPlayerShielded(rockets[i].x, rockets[i].y, a);
         }
     }
 
@@ -1666,6 +1937,21 @@ private:
             }
         }
 
+        // Center pixel "magnetism" indicator (requested):
+        // User removed the ship center pixel from the sprite; we use it as a white
+        // brightness-driven status indicator for the cyan MAGNET powerup.
+        if (ShooterGameConfig::CYAN_POWERUP_KIND == 0) {
+            const uint32_t now = (uint32_t)millis();
+            if (cyanTier > 0 && (int32_t)(cyanUntilMs - now) > 0) {
+                // Brightness scales with tier (1..5) and gently pulses.
+                const uint8_t tier = (uint8_t)min<uint8_t>(ShooterGameConfig::CYAN_TIER_MAX, cyanTier);
+                const uint8_t baseMul = (uint8_t)map((int)tier, 1, (int)ShooterGameConfig::CYAN_TIER_MAX, 70, 255);
+                const bool pulse = ((now / 180) % 2) == 0;
+                const uint8_t mul = pulse ? baseMul : (uint8_t)max(40, (int)baseMul - 55);
+                display->drawPixel(x + 2, y + 2, dimColor(display, COLOR_WHITE, mul));
+            }
+        }
+
         // Rocket ammo indicator (purple powerup):
         // row 2, col 0 and col 4 (0-based in the 5x5 ship)
         // - 1 rocket: left purple pixel
@@ -1676,26 +1962,29 @@ private:
             display->drawPixel(x + 4, ry, (rocketAmmo >= 2) ? COLOR_PURPLE : COLOR_BLACK);
         }
 
-        // Lives indicator is embedded into the ship sprite:
-        // Bottom 3 pixels are always green when "present".
-        // Mapping:
-        // - 3 lives: left + middle + right
-        // - 2 lives: left + right (middle off)
-        // - 1 life: middle only
+        // Lives indicator embedded into the ship sprite (requested):
+        // - Do NOT show empty lives
+        // - Must stay visually centered (with a middle gap when even)
+        // - Extend to up to 5 lives
+        //
+        // This draws into the ship's bottom row (overriding those pixels each frame).
+        const int maxLives = (int)ShooterGameConfig::PLAYER_MAX_LIVES; // expected 5
+        const int shownLives = constrain(lives, 0, maxLives);
         const int ly = y + (SHIP_H - 1);
-        // Clear indicator pixels first (so they are always controlled here).
-        display->drawPixel(x + 1, ly, COLOR_BLACK);
-        display->drawPixel(x + 2, ly, COLOR_BLACK);
-        display->drawPixel(x + 3, ly, COLOR_BLACK);
-        if (lives >= 3) {
-            display->drawPixel(x + 1, ly, COLOR_GREEN);
-            display->drawPixel(x + 2, ly, COLOR_GREEN);
-            display->drawPixel(x + 3, ly, COLOR_GREEN);
-        } else if (lives == 2) {
-            display->drawPixel(x + 1, ly, COLOR_GREEN);
-            display->drawPixel(x + 3, ly, COLOR_GREEN);
-        } else if (lives == 1) {
-            display->drawPixel(x + 2, ly, COLOR_GREEN);
+        if (ly >= 0 && ly < PANEL_RES_Y) {
+            // Clear the full 5-wide band (so the indicator is always controlled here).
+            for (int xx = 0; xx < SHIP_W; xx++) {
+                const int px = x + xx;
+                if (px < 0 || px >= PANEL_RES_X) continue;
+                display->drawPixel(px, ly, COLOR_BLACK);
+            }
+
+            const int cx = x + (int)(SHIP_W / 2);
+            for (int i = 0; i < shownLives; i++) {
+                const int px = centeredPipXWithGap(cx, shownLives, i);
+                if (px < 0 || px >= PANEL_RES_X) continue;
+                display->drawPixel(px, ly, COLOR_GREEN);
+            }
         }
 
         if (shield) {
@@ -1751,10 +2040,11 @@ private:
         const int dotY = max(HUD_H, y); // overlap top row when possible
         if (dotY >= 0 && dotY < PANEL_RES_Y) {
             const int cx = x + (int)(ENEMY_W / 2);
-            const int startX = cx - (int)((maxHp - 1) / 2);
             for (uint8_t i = 0; i < maxHp; i++) {
+                const int px = centeredPipXWithGap(cx, (int)maxHp, (int)i);
+                if (px < 0 || px >= PANEL_RES_X) continue;
                 const uint16_t col = (i < hp) ? COLOR_GREEN : dimColor(display, COLOR_GREEN, 60);
-                display->drawPixel(startX + (int)i, dotY, col);
+                display->drawPixel(px, dotY, col);
             }
         }
     }
@@ -1907,12 +2197,27 @@ private:
 
     void drawPowerup(MatrixPanel_I2S_DMA* display, int x, int y, uint8_t type) {
         const uint16_t c =
-            (type == 0) ? COLOR_BLUE :
-            (type == 1) ? COLOR_RED :
-            (type == 2) ? COLOR_GREEN :
-            COLOR_PURPLE;
-        // 2x2 box
-        display->fillRect(x, y, 2, 2, c);
+            (type == ShooterGameConfig::POWERUP_SHIELD_BLUE) ? COLOR_BLUE :
+            (type == ShooterGameConfig::POWERUP_WEAPON_RED) ? COLOR_RED :
+            (type == ShooterGameConfig::POWERUP_LIFE_GREEN) ? COLOR_GREEN :
+            (type == ShooterGameConfig::POWERUP_ROCKET_PURPLE) ? COLOR_PURPLE :
+            (type == ShooterGameConfig::POWERUP_POINTS_YELLOW) ? COLOR_YELLOW :
+            (type == ShooterGameConfig::POWERUP_FUN_CYAN) ? COLOR_CYAN :
+            COLOR_WHITE;
+        // Render from sprite table so visuals are tweakable in `ShooterGameSprites.h`.
+        const uint8_t t = (uint8_t)min<int>((int)ShooterGameConfig::POWERUP_TYPE_COUNT - 1, (int)type);
+        static constexpr uint8_t MUL_LUT[4] = { 0, 90, 170, 255 };
+        for (int yy = 0; yy < POWERUP_SIZE_PX; yy++) {
+            const int py = y + yy;
+            if (py < 0 || py >= PANEL_RES_Y) continue;
+            for (int xx = 0; xx < POWERUP_SIZE_PX; xx++) {
+                const int px = x + xx;
+                if (px < 0 || px >= PANEL_RES_X) continue;
+                const uint8_t v = ShooterGameConfig::POWERUP_SPRITES[t][yy][xx] & 3u;
+                if (v == 0) continue;
+                display->drawPixel(px, py, dimColor(display, c, MUL_LUT[v]));
+            }
+        }
     }
 
     void drawHudStatus(MatrixPanel_I2S_DMA* display) {
@@ -1945,6 +2250,8 @@ public:
         weaponUntilMs = 0;
         shieldTier = 0;
         weaponTier = 0;
+        cyanUntilMs = 0;
+        cyanTier = 0;
         // Prevent immediate spawn bursts based on uptime.
         lastSpawnMs = (uint32_t)lastUpdate;
         invulnUntilMs = 0;
@@ -1968,6 +2275,12 @@ public:
         
         // Apply current global player color (chosen in the main menu).
         player.color = globalSettings.getPlayerColor();
+
+        // Start game intro sting (RTTTL). AudioManager will no-op if Sound is OFF.
+        // Not looping: this is only a short "first few notes" cue.
+        globalAudio.playRtttl(ShooterGameAudio::MUSIC_THEME_RTTTL, /*loop=*/false);
+        // Reset SFX timers.
+        sfx = SfxState{};
 
         resetPlayerAndBullets();
         initCloudLayer(
@@ -2031,6 +2344,62 @@ public:
         // Update player position
         ControllerPtr p1 = input->getController(0);
         if (p1 && p1->isConnected()) {
+            // -----------------------------------------------------
+            // Dev cheat input: YYYXXX (edge-based), disables leaderboard.
+            // -----------------------------------------------------
+            const bool xNow = InputDetail::btnX(p1, 0);
+            const bool yNow = InputDetail::btnY(p1, 0);
+            const bool xEdge = xNow && !lastXBtn;
+            const bool yEdge = yNow && !lastYBtn;
+            lastXBtn = xNow;
+            lastYBtn = yNow;
+
+            auto feedCheat = [&](char ch) {
+                static constexpr char SEQ[7] = "YYYXXX";
+                const uint32_t tnow = (uint32_t)now;
+                if ((uint32_t)(tnow - lastCheatInputMs) > 1400u) cheatIdx = 0;
+                lastCheatInputMs = tnow;
+
+                if (SEQ[cheatIdx] == ch) {
+                    cheatIdx++;
+                    if (cheatIdx >= 6) {
+                        cheatIdx = 0;
+                        devCheatUsed = true;
+
+                        // Max all powerups instantly.
+                        shieldTier = 10;
+                        shieldUntilMs = tnow + tierDurationMs(shieldTier);
+
+                        weaponTier = 5;
+                        weaponUntilMs = tnow + tierDurationMs(weaponTier);
+
+                        lives = (int)ShooterGameConfig::PLAYER_MAX_LIVES;
+                        rocketAmmo = ShooterGameConfig::PLAYER_MAX_ROCKET_AMMO;
+
+                        if (ShooterGameConfig::CYAN_POWERUP_KIND == 0) {
+                            cyanTier = ShooterGameConfig::CYAN_TIER_MAX;
+                            cyanUntilMs = tnow + tierDurationMs(cyanTier);
+                        }
+
+                        // Some visible feedback.
+                        spawnParticles(player.x + 2.0f, player.y + 2.0f, COLOR_WHITE, 18, tnow);
+                        playSfxPatternCooldown(
+                            ShooterGameAudio::SFX_PICKUP_WHITE,
+                            ShooterGameAudio::SFX_PICKUP_WHITE_N,
+                            ShooterGameConfig::SFX_PICKUP_COOLDOWN_MS,
+                            tnow,
+                            sfx.lastPickupMs
+                        );
+                    }
+                } else {
+                    // Restart matching if this char could be the first.
+                    cheatIdx = (SEQ[0] == ch) ? 1 : 0;
+                }
+            };
+
+            if (yEdge) feedCheat('Y');
+            if (xEdge) feedCheat('X');
+
             const float rawX = clampf((float)InputDetail::axisX(p1, 0) / (float)AXIS_DIVISOR, -1.0f, 1.0f);
             const float rawY = clampf((float)InputDetail::axisY(p1, 0) / (float)AXIS_DIVISOR, -1.0f, 1.0f);
             float sx = deadzone01(rawX, STICK_DEADZONE);
@@ -2079,64 +2448,52 @@ public:
             // Shoot with right trigger (fallback to A)
             const uint16_t rt = InputDetail::throttle(p1, 0);
             const bool shoot = (rt >= TRIGGER_THRESHOLD) || InputDetail::r2(p1, 0) || p1->a();
-            if (shoot && (now - lastShot > SHOT_COOLDOWN_MS) && phase == PHASE_PLAYING) {
+            uint32_t shotCooldown = (uint32_t)SHOT_COOLDOWN_MS;
+            if (ShooterGameConfig::CYAN_POWERUP_KIND == 2 && (int32_t)(cyanUntilMs - (uint32_t)now) > 0) {
+                shotCooldown = max<uint32_t>(60u, shotCooldown / 2u);
+            }
+            if (shoot && (uint32_t)(now - lastShot) > shotCooldown && phase == PHASE_PLAYING) {
                 const int cx = (int)(player.x + (float)SHIP_W / 2.0f);
 
-                // Weapon tier patterns:
-                // tier1: standard cyan 1 dmg (duration 10s)
-                // tier2: red 2 dmg (duration 20s)
-                // tier3: 3 rows cyan, 1 dmg each (duration 30s)
-                // tier4: middle red 2 dmg, 2 side cyan 1 dmg (duration 40s)
-                // tier5: 3 rows red, 2 dmg each (duration 50s)
+                // Red weapon progression (requested):
+                // - tier0 (inactive): standard (cyan) 1 lane
+                // - tier1: red 1 lane
+                // - tier2: standard (cyan) 3 lanes
+                // - tier3: standard (cyan) 3 lanes, center bullet red
+                // - tier4: red 3 lanes (2 dmg)
+                // - tier5: red 3 lanes (3 dmg)
                 const uint32_t nowMs = (uint32_t)now;
                 const bool weaponActive = ((int32_t)(weaponUntilMs - nowMs) > 0) && weaponTier > 0;
                 const uint8_t t = weaponActive ? weaponTier : 0;
+                const int py = (int)player.y - 1;
 
-                if (t == 3 || t == 4 || t == 5) {
-                    // 3 rows
-                    const int py = (int)player.y;
-                    spawnPlayerBullet(cx, py - 1);
-                    spawnPlayerBullet(cx - 2, py - 1);
-                    spawnPlayerBullet(cx + 2, py - 1);
-
-                    // tier4: make center bullet "red 2 dmg"
-                    if (t == 4) {
-                        for (int i = 0; i < MAX_PLAYER_BULLETS; i++) {
-                            if (!playerBullets[i].active) continue;
-                            if (playerBullets[i].x == cx && playerBullets[i].y == (int)player.y - 1) {
-                                playerBullets[i].color = COLOR_RED;
-                                playerBullets[i].dmg = 2;
-                                break;
-                            }
-                        }
-                    }
-
-                    // tier5: all bullets red 2 dmg
-                    if (t == 5) {
-                        for (int i = 0; i < MAX_PLAYER_BULLETS; i++) {
-                            if (!playerBullets[i].active) continue;
-                            if (playerBullets[i].y == (int)player.y - 1 &&
-                                (playerBullets[i].x == cx || playerBullets[i].x == cx - 2 || playerBullets[i].x == cx + 2)) {
-                                playerBullets[i].color = COLOR_RED;
-                                playerBullets[i].dmg = 2;
-                            }
-                        }
-                    }
+                if (t == 0) {
+                    spawnPlayerBullet(cx, py, COLOR_CYAN, 1);
+                } else if (t == 1) {
+                    spawnPlayerBullet(cx, py, COLOR_RED, 1);
+                } else if (t == 2) {
+                    spawnPlayerBullet(cx, py, COLOR_CYAN, 1);
+                    spawnPlayerBullet(cx - 2, py, COLOR_CYAN, 1);
+                    spawnPlayerBullet(cx + 2, py, COLOR_CYAN, 1);
+                } else if (t == 3) {
+                    spawnPlayerBullet(cx, py, COLOR_RED, 1);
+                    spawnPlayerBullet(cx - 2, py, COLOR_CYAN, 1);
+                    spawnPlayerBullet(cx + 2, py, COLOR_CYAN, 1);
                 } else {
-                    // Single bullet
-                    spawnPlayerBullet(cx, (int)player.y - 1);
-                    // tier2: red 2 dmg
-                    if (t == 2) {
-                        for (int i = 0; i < MAX_PLAYER_BULLETS; i++) {
-                            if (!playerBullets[i].active) continue;
-                            if (playerBullets[i].x == cx && playerBullets[i].y == (int)player.y - 1) {
-                                playerBullets[i].color = COLOR_RED;
-                                playerBullets[i].dmg = 2;
-                                break;
-                            }
-                        }
-                    }
+                    const uint8_t dmg = (t >= 5) ? 3 : 2;
+                    spawnPlayerBullet(cx, py, COLOR_RED, dmg);
+                    spawnPlayerBullet(cx - 2, py, COLOR_RED, dmg);
+                    spawnPlayerBullet(cx + 2, py, COLOR_RED, dmg);
                 }
+
+                playSfxPatternCooldown(
+                    ShooterGameAudio::SFX_SHOOT,
+                    ShooterGameAudio::SFX_SHOOT_N,
+                    ShooterGameConfig::SFX_SHOOT_COOLDOWN_MS,
+                    (uint32_t)now,
+                    sfx.lastShootMs
+                );
+
                 lastShot = now;
             }
 
@@ -2147,6 +2504,14 @@ public:
                 spawnPlayerRocket(rx, ry, (uint32_t)now);
                 rocketAmmo--;
                 lastRocketFireMs = (uint32_t)now;
+
+                playSfxPatternCooldown(
+                    ShooterGameAudio::SFX_ROCKET,
+                    ShooterGameAudio::SFX_ROCKET_N,
+                    ShooterGameConfig::SFX_ROCKET_COOLDOWN_MS,
+                    (uint32_t)now,
+                    sfx.lastRocketMs
+                );
             }
         }
 
@@ -2280,9 +2645,12 @@ public:
     // ------------------------------
     // Leaderboard integration
     // ------------------------------
-    bool leaderboardEnabled() const override { return true; }
+    bool leaderboardEnabled() const override { return !devCheatUsed; }
     const char* leaderboardId() const override { return "shooter"; }
     const char* leaderboardName() const override { return "Shooter"; }
-    uint32_t leaderboardScore() const override { return (score > 0) ? (uint32_t)score : 0u; }
+    uint32_t leaderboardScore() const override {
+        if (devCheatUsed) return 0u;
+        return (score > 0) ? (uint32_t)score : 0u;
+    }
 };
 

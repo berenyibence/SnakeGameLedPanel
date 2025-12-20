@@ -16,7 +16,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include "../../config.h"
+#include "../../engine/config.h"
 
 namespace ShooterGameConfig {
 
@@ -125,6 +125,17 @@ static constexpr uint16_t BOSS_HITS_BASE = 10;  // level 1 => 10
 static constexpr uint16_t ENEMY_SPAWN_INTERVAL_MS = 450;
 
 // -----------------------------------------------------------------------------
+// Audio (buzzer) - SFX throttling
+// -----------------------------------------------------------------------------
+// Cooldowns (ms) to prevent "sound spam" on frequent actions.
+static constexpr uint16_t SFX_SHOOT_COOLDOWN_MS      = 60;
+static constexpr uint16_t SFX_ROCKET_COOLDOWN_MS     = 140;
+static constexpr uint16_t SFX_ENEMY_KILL_COOLDOWN_MS = 80;
+static constexpr uint16_t SFX_PICKUP_COOLDOWN_MS     = 160;
+static constexpr uint16_t SFX_PLAYER_HIT_COOLDOWN_MS = 240;
+static constexpr uint16_t SFX_BOSS_DEATH_COOLDOWN_MS = 1200;
+
+// -----------------------------------------------------------------------------
 // Enemy behavior tuning
 // -----------------------------------------------------------------------------
 // Enemies fly in from above and can exit the screen downward.
@@ -149,13 +160,62 @@ static constexpr float ENEMY_FIRE_P_MAX = 0.45f;
 // -----------------------------------------------------------------------------
 // Powerup drop chance per kill, in percent.
 // (The current implementation uses an integer roll against this.)
-static constexpr uint8_t POWERUP_DROP_CHANCE_PERCENT = 40;
+static constexpr uint8_t POWERUP_DROP_CHANCE_PERCENT = 60;
 
 // Powerup physics (floaty / bouncy packs)
 static constexpr float POWERUP_GRAVITY = 0.012f;
 static constexpr float POWERUP_DRAG = 0.984f;
 static constexpr float POWERUP_BOUNCE = 0.78f;
 static constexpr uint8_t POWERUP_SIZE_PX = 2; // drawn as 2x2 box
+
+// Powerup types (ShooterGame.h uses these numeric IDs).
+// NOTE: Boss guaranteed loot uses only the first 4 types (0..3).
+static constexpr uint8_t POWERUP_SHIELD_BLUE   = 0;
+static constexpr uint8_t POWERUP_WEAPON_RED    = 1;
+static constexpr uint8_t POWERUP_LIFE_GREEN    = 2;
+static constexpr uint8_t POWERUP_ROCKET_PURPLE = 3;
+static constexpr uint8_t POWERUP_POINTS_YELLOW = 4; // points only
+static constexpr uint8_t POWERUP_FUN_CYAN      = 5; // configurable "fun" powerup (see CYAN_* below)
+static constexpr uint8_t POWERUP_BUNDLE_WHITE  = 6; // rare: grants one tier of each (not dropped by boss)
+static constexpr uint8_t POWERUP_TYPE_COUNT    = 7;
+
+// Yellow powerup: points only (no other effect).
+static constexpr uint16_t YELLOW_POINTS_BASE = 70;        // base points added on pickup
+static constexpr uint16_t YELLOW_POINTS_PER_LEVEL = 6;    // extra points per level
+static constexpr uint16_t YELLOW_POINTS_JITTER = 40;      // +/- jitter range (adds variety)
+
+// White powerup: rare, grants "one of each other loot".
+// IMPORTANT: White must NOT appear in the boss guaranteed loot table (handled in ShooterGame.h).
+static constexpr uint8_t WHITE_DROP_WEIGHT = 1; // extremely rare in normal drops
+
+// Cyan powerup: pick ONE fun behavior by changing CYAN_POWERUP_KIND.
+// Implemented kinds (0..4):
+// 0 = MAGNET: powerups are pulled toward the ship for a short time
+// 1 = PIERCING: player bullets do not disappear on first enemy hit
+// 2 = RAPID_FIRE: reduces shot cooldown for a short time
+// 3 = SMART_BOMB: instant clears all normal enemies + clears enemy bullets
+// 4 = SCORE_MULT: temporarily doubles score from kills
+static constexpr uint8_t CYAN_POWERUP_KIND = 0;
+static constexpr uint16_t CYAN_DURATION_MS = 8500;
+static constexpr uint8_t CYAN_SCORE_MULT = 2;
+
+// MAGNET tuning (CYAN_POWERUP_KIND == 0):
+// - Uses the same "tier duration" model as other tiers (see ShooterGame::tierDurationMs).
+// - Tier 0 = no attraction, tier 5 = strong attraction (slightly stronger than gravity).
+static constexpr uint8_t CYAN_TIER_MAX = 5;
+// Tier 5 strength (requested): 4x stronger vs previous tuning.
+static constexpr float CYAN_MAGNET_ACCEL_MAX_AT_TIER5 = POWERUP_GRAVITY * 4.80f; // ~= 4x (was 1.20x)
+static constexpr float CYAN_MAGNET_K_AT_TIER5 = 0.00280f; // ~= 4x (was 0.00070)
+
+// Normal enemy drop weights (sum doesn't need to be 100, it's normalized by cumulative checks).
+// White is handled as a weight here but still only appears via normal drops (not boss loot).
+static constexpr uint8_t DROP_W_BLUE   = 20;
+static constexpr uint8_t DROP_W_RED    = 18;
+static constexpr uint8_t DROP_W_GREEN  = 18;
+static constexpr uint8_t DROP_W_PURPLE = 14;
+static constexpr uint8_t DROP_W_YELLOW = 16;
+static constexpr uint8_t DROP_W_CYAN   = 10;
+static constexpr uint8_t DROP_W_WHITE  = WHITE_DROP_WEIGHT;
 
 // -----------------------------------------------------------------------------
 // Boss tuning
@@ -175,6 +235,18 @@ static constexpr uint8_t BOSSES_WITHOUT_ROCKETS = 5;
 // Boss death sequence timing
 static constexpr uint16_t BOSS_DEATH_EXPLOSION_MS = 2000; // huge explosion duration
 static constexpr uint16_t BOSS_LOOT_GRACE_MS = 1000;      // pause after loot to pick up
+
+// Boss guaranteed loot (after death explosion):
+// Randomize launch vectors so it doesn't always look the same, while keeping drops catchable.
+// Notes:
+// - VY is typically slightly negative at spawn (kicks upward a bit), then gravity takes over.
+// - VX is kept within the same safety clamps used for normal powerups.
+static constexpr float BOSS_LOOT_VX_SPREAD = 0.75f;      // overall left/right fan-out (base)
+static constexpr float BOSS_LOOT_VX_JITTER = 0.22f;      // per-item randomness added to VX
+static constexpr float BOSS_LOOT_VY_BASE_MIN = -0.16f;   // base upward kick range (more negative = more upward)
+static constexpr float BOSS_LOOT_VY_BASE_MAX = -0.06f;
+static constexpr float BOSS_LOOT_VY_JITTER = 0.04f;      // per-item randomness added to VY
+static constexpr float BOSS_LOOT_POS_JITTER_PX = 2.0f;   // small spawn position jitter around the boss center (pixels)
 
 // Player death explosion (final death): show a big explosion animation, then game over screen.
 static constexpr uint16_t PLAYER_DEATH_EXPLOSION_MS = 3000;
@@ -213,10 +285,10 @@ static constexpr float CLOUD_LAYER1_VY = 0.18f;
 static constexpr float CLOUD_LAYER0_VX_JITTER = 0.010f;
 static constexpr float CLOUD_LAYER1_VX_JITTER = 0.055f;
 
-static constexpr uint8_t CLOUD_LAYER0_MUL = 14;  // very dim
+static constexpr uint8_t CLOUD_LAYER0_MUL = 15;  // very dim
 // Foreground clouds should still read as "near" but must not distract from gameplay.
 // Tune this down if clouds compete with enemies/bullets.
-static constexpr uint8_t CLOUD_LAYER1_MUL = 50; // even dimmer near layer (requested)
+static constexpr uint8_t CLOUD_LAYER1_MUL = 30; // even dimmer near layer (requested)
 
 // Sprite tables (clouds + ships + bosses) live in a separate header for easier editing.
 // NOTE: Included here so users can tune visuals in one place without touching game logic.

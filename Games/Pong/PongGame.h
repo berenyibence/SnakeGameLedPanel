@@ -2,14 +2,16 @@
 #include <Arduino.h>
 #include <math.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include "../../GameBase.h"
-#include "../../ControllerManager.h"
-#include "../../config.h"
-#include "../../SmallFont.h"
-#include "../../Settings.h"
-#include "../../UserProfiles.h"
-#include "../../GameOverLeaderboardView.h"
+#include "../../engine/GameBase.h"
+#include "../../engine/ControllerManager.h"
+#include "../../engine/config.h"
+#include "../../engine/AudioManager.h"
+#include "../../component/SmallFont.h"
+#include "../../engine/Settings.h"
+#include "../../engine/UserProfiles.h"
+#include "../../component/GameOverLeaderboardView.h"
 #include "PongGameConfig.h"
+#include "PongGameAudio.h"
 
 /**
  * PongGame - Classic Pong game implementation
@@ -90,6 +92,46 @@ private:
     uint8_t lastPointWinner = 0; // 0=left, 1=right
     static constexpr uint16_t POINT_FLASH_MS = PongGameConfig::POINT_FLASH_MS;
     static constexpr uint16_t COUNTDOWN_MS = PongGameConfig::COUNTDOWN_MS;
+
+    // ---------------------------------------------------------
+    // Audio SFX (buzzer) - small cooldowns to prevent "stuck bounce" spam
+    // ---------------------------------------------------------
+    uint32_t lastWallSfxMs = 0;
+    uint32_t lastPaddleSfxMs = 0;
+    static constexpr uint16_t WALL_SFX_COOLDOWN_MS = 30;
+    static constexpr uint16_t PADDLE_SFX_COOLDOWN_MS = 18;
+
+    inline void sfxPaddleHit(uint32_t now) {
+        if ((uint32_t)(now - lastPaddleSfxMs) < PADDLE_SFX_COOLDOWN_MS) return;
+        lastPaddleSfxMs = now;
+        globalAudio.playPattern(
+            PongGameAudio::SFX_PADDLE_HIT,
+            (uint8_t)(sizeof(PongGameAudio::SFX_PADDLE_HIT) / sizeof(PongGameAudio::SFX_PADDLE_HIT[0]))
+        );
+    }
+
+    inline void sfxWallHit(uint32_t now) {
+        if ((uint32_t)(now - lastWallSfxMs) < WALL_SFX_COOLDOWN_MS) return;
+        lastWallSfxMs = now;
+        globalAudio.playPattern(
+            PongGameAudio::SFX_WALL_HIT,
+            (uint8_t)(sizeof(PongGameAudio::SFX_WALL_HIT) / sizeof(PongGameAudio::SFX_WALL_HIT[0]))
+        );
+    }
+
+    inline void sfxScore() {
+        globalAudio.playPattern(
+            PongGameAudio::SFX_SCORE,
+            (uint8_t)(sizeof(PongGameAudio::SFX_SCORE) / sizeof(PongGameAudio::SFX_SCORE[0]))
+        );
+    }
+
+    inline void sfxGameOver() {
+        globalAudio.playPattern(
+            PongGameAudio::SFX_GAME_OVER,
+            (uint8_t)(sizeof(PongGameAudio::SFX_GAME_OVER) / sizeof(PongGameAudio::SFX_GAME_OVER[0]))
+        );
+    }
     
     /**
      * Reset ball to center with random direction
@@ -156,6 +198,8 @@ public:
     void start() override {
         gameOver = false;
         lastUpdate = millis();
+        lastWallSfxMs = 0;
+        lastPaddleSfxMs = 0;
         lastAiThinkMs = 0;
         aiAimY = PANEL_RES_Y / 2.0f;
         phase = PHASE_COUNTDOWN;
@@ -186,7 +230,7 @@ public:
         if (gameOver) return;
         
         // Throttle updates for smooth gameplay
-        unsigned long now = millis();
+        const unsigned long now = millis();
         if (now - lastUpdate < UPDATE_INTERVAL_MS) return;
         lastUpdate = now;
 
@@ -258,6 +302,7 @@ public:
         if (ball.y - BALL_HALF <= 0 || ball.y + BALL_HALF >= PANEL_RES_Y) {
             ball.vy = -ball.vy;
             ball.y = constrain(ball.y, BALL_HALF, PANEL_RES_Y - BALL_HALF);
+            sfxWallHit((uint32_t)now);
         }
         
         // Ball collision with paddles
@@ -265,6 +310,7 @@ public:
             ball.vx = abs(ball.vx);  // Ensure ball goes right
             ball.vy += (ball.y - (leftPaddle.y + leftPaddle.height / 2.0f)) * 0.09f;
             ball.x = leftPaddle.x + leftPaddle.width + BALL_HALF;
+            sfxPaddleHit((uint32_t)now);
             // Normalize velocity
             float speed = sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
             if (speed > 0) {
@@ -278,6 +324,7 @@ public:
             ball.vx = -abs(ball.vx);  // Ensure ball goes left
             ball.vy += (ball.y - (rightPaddle.y + rightPaddle.height / 2.0f)) * 0.09f;
             ball.x = rightPaddle.x - BALL_HALF;
+            sfxPaddleHit((uint32_t)now);
             // Normalize velocity
             float speed = sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
             if (speed > 0) {
@@ -292,19 +339,23 @@ public:
             rightPaddle.score++;
             if (rightPaddle.score >= 5) {
                 gameOver = true;
+                sfxGameOver();
             } else {
                 lastPointWinner = 1;
                 phase = PHASE_POINT_FLASH;
                 phaseStartMs = now;
+                sfxScore();
             }
         } else if (ball.x > PANEL_RES_X + BALL_HALF) {
             leftPaddle.score++;
             if (leftPaddle.score >= 5) {
                 gameOver = true;
+                sfxGameOver();
             } else {
                 lastPointWinner = 0;
                 phase = PHASE_POINT_FLASH;
                 phaseStartMs = now;
+                sfxScore();
             }
         }
     }

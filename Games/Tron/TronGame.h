@@ -1,14 +1,16 @@
 #pragma once
 #include <Arduino.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include "../../GameBase.h"
-#include "../../ControllerManager.h"
-#include "../../config.h"
-#include "../../SmallFont.h"
-#include "../../Settings.h"
-#include "../../UserProfiles.h"
-#include "../../GameOverLeaderboardView.h"
+#include "../../engine/GameBase.h"
+#include "../../engine/ControllerManager.h"
+#include "../../engine/config.h"
+#include "../../engine/AudioManager.h"
+#include "../../component/SmallFont.h"
+#include "../../engine/Settings.h"
+#include "../../engine/UserProfiles.h"
+#include "../../component/GameOverLeaderboardView.h"
 #include "TronGameConfig.h"
+#include "TronGameAudio.h"
 
 /**
  * TronGame - Classic Tron / Light-Cycles
@@ -85,6 +87,16 @@ private:
     uint32_t lastTickMs = 0;
     uint32_t roundEndMs = 0;
     bool roundActive = false;
+
+    // ---------------------------------------------------------
+    // Minimal audio SFX state (cooldowns prevent repeat spam)
+    // ---------------------------------------------------------
+    uint32_t lastTurnSfxMs[MAX_GAMEPADS] = { 0, 0, 0, 0 };
+    uint32_t lastCrashSfxMs[MAX_GAMEPADS] = { 0, 0, 0, 0 };
+    uint32_t lastRoundWinSfxMs = 0;
+    static constexpr uint16_t TURN_SFX_COOLDOWN_MS = 120;
+    static constexpr uint16_t CRASH_SFX_COOLDOWN_MS = 250;
+    static constexpr uint16_t ROUND_WIN_SFX_COOLDOWN_MS = 350;
 
     uint16_t playerColors[4] = { COLOR_GREEN, COLOR_CYAN, COLOR_ORANGE, COLOR_PURPLE };
 
@@ -247,6 +259,19 @@ private:
 
         // Tron: do not allow 180-degree reversal
         if (!isOpposite(p.dir, desired)) {
+            // Turn SFX (minimal):
+            // - Only when the direction actually changes (edge)
+            // - Only for the human player on pad 0 to keep multiplayer/AI from being noisy
+            if (!p.isAi && p.padIndex == 0 && desired != p.nextDir) {
+                const uint32_t now = millis();
+                if ((uint32_t)(now - lastTurnSfxMs[p.padIndex]) >= TURN_SFX_COOLDOWN_MS) {
+                    lastTurnSfxMs[p.padIndex] = now;
+                    globalAudio.playPattern(
+                        TronGameAudio::SFX_TURN,
+                        (uint8_t)(sizeof(TronGameAudio::SFX_TURN) / sizeof(TronGameAudio::SFX_TURN[0]))
+                    );
+                }
+            }
             p.nextDir = desired;
         }
     }
@@ -323,6 +348,13 @@ public:
         gameOver = false;
         winnerPad = -1;
         roundNo = 1;
+
+        // Reset audio cooldowns for a clean match start.
+        for (int i = 0; i < MAX_GAMEPADS; i++) {
+            lastTurnSfxMs[i] = 0;
+            lastCrashSfxMs[i] = 0;
+        }
+        lastRoundWinSfxMs = 0;
 
         setupPlayersFromConnectedControllers();
         startRound(millis());
@@ -412,6 +444,7 @@ public:
             Player& p = players[i];
             if (!p.active || !p.alive) continue;
 
+            const bool wasAlive = p.alive;
             if (next[i].willMove) {
                 p.x = next[i].x;
                 p.y = next[i].y;
@@ -419,6 +452,18 @@ public:
 
             if (next[i].crash) {
                 p.alive = false;
+
+                // Crash SFX (minimal):
+                // - Only for pad 0 so multiplayer doesn't become chaotic
+                if (wasAlive && p.padIndex == 0) {
+                    if ((uint32_t)(now - lastCrashSfxMs[p.padIndex]) >= CRASH_SFX_COOLDOWN_MS) {
+                        lastCrashSfxMs[p.padIndex] = now;
+                        globalAudio.playPattern(
+                            TronGameAudio::SFX_CRASH,
+                            (uint8_t)(sizeof(TronGameAudio::SFX_CRASH) / sizeof(TronGameAudio::SFX_CRASH[0]))
+                        );
+                    }
+                }
             } else {
                 // Survived: occupy new head cell (trail is permanent)
                 markCell(p.x, p.y, (uint8_t)i);
@@ -437,6 +482,21 @@ public:
                 if (players[last].score >= WIN_SCORE) {
                     gameOver = true;
                     winnerPad = last;
+
+                    // Match over SFX (minimal): only once at match end.
+                    globalAudio.playPattern(
+                        TronGameAudio::SFX_GAME_OVER,
+                        (uint8_t)(sizeof(TronGameAudio::SFX_GAME_OVER) / sizeof(TronGameAudio::SFX_GAME_OVER[0]))
+                    );
+                } else {
+                    // Round win SFX: rate-limited so we don't double-play on edge cases.
+                    if ((uint32_t)(now - lastRoundWinSfxMs) >= ROUND_WIN_SFX_COOLDOWN_MS) {
+                        lastRoundWinSfxMs = now;
+                        globalAudio.playPattern(
+                            TronGameAudio::SFX_ROUND_WIN,
+                            (uint8_t)(sizeof(TronGameAudio::SFX_ROUND_WIN) / sizeof(TronGameAudio::SFX_ROUND_WIN[0]))
+                        );
+                    }
                 }
             }
         }

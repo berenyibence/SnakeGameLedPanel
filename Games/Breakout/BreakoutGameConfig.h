@@ -12,7 +12,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include "../../config.h"
+#include "../../engine/config.h"
 
 namespace BreakoutGameConfig {
 
@@ -28,6 +28,20 @@ static constexpr int HUD_H = 8;
 
 // Countdown
 static constexpr uint16_t COUNTDOWN_MS = 1800;
+
+// -----------------------------------------------------------------------------
+// Audio (buzzer) - SFX throttling
+// -----------------------------------------------------------------------------
+// Cooldowns (ms) to prevent "sound spam" on frequent actions.
+static constexpr uint16_t SFX_LAUNCH_COOLDOWN_MS      = 120;
+static constexpr uint16_t SFX_PADDLE_HIT_COOLDOWN_MS  = 70;
+static constexpr uint16_t SFX_BRICK_HIT_COOLDOWN_MS   = 55;
+static constexpr uint16_t SFX_BRICK_BREAK_COOLDOWN_MS = 80;
+static constexpr uint16_t SFX_PICKUP_COOLDOWN_MS      = 160;
+static constexpr uint16_t SFX_SHIELD_COOLDOWN_MS      = 220;
+static constexpr uint16_t SFX_LIFE_LOST_COOLDOWN_MS   = 300;
+static constexpr uint16_t SFX_ALL_CLEAR_COOLDOWN_MS   = 1000;
+static constexpr uint16_t SFX_GAME_OVER_COOLDOWN_MS   = 1400;
 
 // -----------------------------------------------------------------------------
 // Paddles
@@ -49,6 +63,14 @@ static constexpr int BRICK_SPACING = 1;
 // -----------------------------------------------------------------------------
 static constexpr int BALL_SIZE_PX = 2;
 static inline constexpr float BALL_HALF = 1.0f; // 2x2 render => half-size ~1px
+
+// IMPORTANT:
+// - Ball speed should NOT scale with "level".
+// - Difficulty is controlled via brick HP / scroll / spawn pacing instead.
+// - Values are in "pixels per logic tick" (tick ~60 FPS by default).
+static constexpr float BALL_SPEED = 0.95f;
+static constexpr float BALL_SHOT_MULT = 1.35f;  // green powerup / straight-shot launch boost
+static constexpr float BALL_MAX_SPEED = 1.65f;  // absolute clamp to prevent runaway spikes
 
 // -----------------------------------------------------------------------------
 // Pools (avoid heap churn on ESP32)

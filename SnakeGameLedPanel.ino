@@ -9,9 +9,10 @@
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <Bluepad32.h>
 
-#include "config.h"
-#include "DisplayPresent.h"
-#include "ControllerManager.h"
+#include "engine/config.h"
+#include "engine/DisplayPresent.h"
+#include "engine/ControllerManager.h"
+#include "engine/AudioManager.h"
 #include "Games/Snake/SnakeGame.h"
 #include "Games/Tron/TronGame.h"
 #include "Games/Pong/PongGame.h"
@@ -20,15 +21,18 @@
 #include "Games/Labyrinth/LabyrinthGame.h"
 #include "Games/Tetris/TetrisGame.h"
 #include "Games/Asteroids/AsteroidsGame.h"
-#include "Menu.h"
-#include "EepromManager.h"
-#include "Settings.h"
-#include "SettingsMenu.h"
-#include "LeaderboardMenu.h"
-#include "Leaderboard.h"
-#include "UserProfiles.h"
-#include "UserSelectMenu.h"
-#include "SmallFont.h"
+#include "Games/Music/MusicApp.h"
+#include "Games/MVisual/MVisualApp.h"
+#include "applet/Menu.h"
+#include "engine/EepromManager.h"
+#include "engine/Settings.h"
+#include "applet/SettingsMenu.h"
+#include "applet/LeaderboardMenu.h"
+#include "engine/Leaderboard.h"
+#include "engine/UserProfiles.h"
+#include "applet/UserSelectMenu.h"
+#include "applet/PauseMenu.h"
+#include "component/SmallFont.h"
 
 // ---------------------------------------------------------
 // Globals
@@ -39,6 +43,7 @@ Menu menu;
 SettingsMenu settingsMenu;
 LeaderboardMenu leaderboardMenu;
 UserSelectMenu userSelectMenu;
+PauseMenu pauseMenu;
 GameBase* currentGame = nullptr;
 // Monotonic game-run token to avoid relying on pointer addresses (which can be reused).
 // Incremented each time we start a NEW game instance from the menu.
@@ -106,6 +111,7 @@ enum AppState {
   STATE_SETTINGS,
   STATE_USER_SELECT,
   STATE_LEADERBOARD,
+  STATE_PAUSE,
   STATE_GAME_RUNNING
 };
 
@@ -116,6 +122,66 @@ AppState resumeStateAfterController = STATE_MENU;
 // When a controller connects and no user is bound yet, we go through
 // STATE_USER_SELECT first, then continue here.
 AppState nextStateAfterUserSelect = STATE_MENU;
+
+// ---------------------------------------------------------
+// Input edge helpers (START)
+// ---------------------------------------------------------
+static inline bool startPressedEdge(uint8_t padIndex, ControllerManager* input) {
+  static bool lastPressed[MAX_GAMEPADS] = { false, false, false, false };
+  if (!input || padIndex >= MAX_GAMEPADS) return false;
+
+  ControllerPtr ctl = input->getController((int)padIndex);
+  const bool pressed = (ctl != nullptr) && isStartPressed(ctl);
+  const bool edge = pressed && !lastPressed[padIndex];
+  lastPressed[padIndex] = pressed;
+  return edge;
+}
+
+static inline bool aPressedEdge(uint8_t padIndex, ControllerManager* input) {
+  static bool lastPressed[MAX_GAMEPADS] = { false, false, false, false };
+  if (!input || padIndex >= MAX_GAMEPADS) return false;
+
+  ControllerPtr ctl = input->getController((int)padIndex);
+  const bool pressed = (ctl != nullptr) && (bool)ctl->a();
+  const bool edge = pressed && !lastPressed[padIndex];
+  lastPressed[padIndex] = pressed;
+  return edge;
+}
+
+static inline bool bPressedEdge(uint8_t padIndex, ControllerManager* input) {
+  static bool lastPressed[MAX_GAMEPADS] = { false, false, false, false };
+  if (!input || padIndex >= MAX_GAMEPADS) return false;
+
+  ControllerPtr ctl = input->getController((int)padIndex);
+  const bool pressed = (ctl != nullptr) && (bool)ctl->b();
+  const bool edge = pressed && !lastPressed[padIndex];
+  lastPressed[padIndex] = pressed;
+  return edge;
+}
+
+static inline int8_t firstPadWithStartEdge(ControllerManager* input) {
+  if (!input) return -1;
+  for (int i = 0; i < MAX_GAMEPADS; i++) {
+    if (startPressedEdge((uint8_t)i, input)) return (int8_t)i;
+  }
+  return -1;
+}
+
+static inline int8_t firstPadWithAEdge(ControllerManager* input) {
+  if (!input) return -1;
+  for (int i = 0; i < MAX_GAMEPADS; i++) {
+    if (aPressedEdge((uint8_t)i, input)) return (int8_t)i;
+  }
+  return -1;
+}
+
+static inline int8_t firstPadWithBEdge(ControllerManager* input) {
+  if (!input) return -1;
+  for (int i = 0; i < MAX_GAMEPADS; i++) {
+    if (bPressedEdge((uint8_t)i, input)) return (int8_t)i;
+  }
+  return -1;
+}
 
 // ---------------------------------------------------------
 // Setup
@@ -209,6 +275,21 @@ void setup() {
   Serial.println(F("[Init] Loading settings..."));
   globalSettings.load();
 
+  // -----------------------------------------------------
+  // Audio (buzzer) - basic service init
+  // -----------------------------------------------------
+  globalAudio.begin();
+  #if DEBUG_AUDIO
+  Serial.print(F("[Audio] begin() done. ENABLE_AUDIO="));
+  Serial.print((int)ENABLE_AUDIO);
+  Serial.print(F(" pin="));
+  Serial.print((int)AUDIO_BUZZER_PIN);
+  Serial.print(F(" ch="));
+  Serial.print((int)AUDIO_PWM_CHANNEL);
+  Serial.print(F(" soundEnabled="));
+  Serial.println(globalSettings.isSoundEnabled() ? F("ON") : F("OFF"));
+  #endif
+
   // Force-load user profiles and leaderboard once at boot for debug visibility.
   Serial.print(F("[Init] Users="));
   Serial.println(UserProfiles::userCount());
@@ -258,6 +339,9 @@ void loop() {
   // 1. Hardware/Protocol Updates
   // Allow Bluepad32 to process incoming packets (Required)
   globalControllerManager->update();
+
+  // Audio service tick (non-blocking)
+  globalAudio.update();
 
   // 2. State Machine Logic
   switch (currentState) {
@@ -350,6 +434,12 @@ void loop() {
                   currentGame = new AsteroidsGame();
                 }
                 break;
+              case 8:  // Music
+                currentGame = new MusicApp();
+                break;
+              case 9:  // MVisual
+                currentGame = new MVisualApp();
+                break;
               default:
                 currentGame = nullptr;
                 break;
@@ -363,6 +453,18 @@ void loop() {
               forceGameRender = true;
             }
           }
+        }
+
+        // START in menu: open user select for the controller that pressed START.
+        const int8_t sp = firstPadWithStartEdge(globalControllerManager);
+        if (sp >= 0) {
+          globalAudio.uiStartStop();
+          nextStateAfterUserSelect = STATE_MENU;
+          userSelectMenu.beginForPad((uint8_t)sp);
+          currentState = STATE_USER_SELECT;
+          dma_display->clearScreen();
+          forceMenuRender = true;
+          delay(300); // debounce START
         }
       }
       break;
@@ -406,6 +508,7 @@ void loop() {
           currentState = nextStateAfterUserSelect;
           dma_display->clearScreen();
           forceMenuRender = true;
+          forceGameRender = true; // if we return into PAUSE/GAME, render immediately
           // Debounce the confirming 'A' press so it doesn't immediately select "Snake" in the menu.
           delay(250);
         }
@@ -427,6 +530,50 @@ void loop() {
           dma_display->clearScreen();
           forceMenuRender = true;
         }
+      }
+      break;
+
+    // --- STATE: PAUSE ---
+    // Freeze game updates, draw the game as a background, overlay pause UI.
+    case STATE_PAUSE:
+      if (globalControllerManager->getConnectedCount() == 0) {
+        resumeStateAfterController = STATE_PAUSE;
+        currentState = STATE_NO_CONTROLLER;
+      } else if (currentGame) {
+        // Render underlying game + overlay (capped FPS using game pacing).
+        gameIntervalMs = fpsToIntervalMs(currentGame->preferredRenderFps());
+        if (shouldRenderNow(nowMs, lastGameRenderMs, gameIntervalMs, forceGameRender)) {
+          currentGame->draw(dma_display);
+          pauseMenu.draw(dma_display);
+          presentFrame(dma_display);
+        }
+
+        // START toggles resume (edge-triggered to avoid instant re-pause)
+        if (startPressedEdge(pauseMenu.pad(), globalControllerManager)) {
+          globalAudio.uiStartStop();
+          currentState = STATE_GAME_RUNNING;
+          forceGameRender = true;
+          delay(250);
+          break;
+        }
+
+        const PauseMenu::Action a = pauseMenu.update(globalControllerManager);
+        if (a == PauseMenu::ACTION_RESUME) {
+          currentState = STATE_GAME_RUNNING;
+          forceGameRender = true;
+          delay(250);
+        } else if (a == PauseMenu::ACTION_QUIT_TO_MENU) {
+          delete currentGame;
+          currentGame = nullptr;
+          currentState = STATE_MENU;
+          dma_display->clearScreen();
+          forceMenuRender = true;
+          delay(300);
+        }
+      } else {
+        // No game to pause -> fallback to menu.
+        currentState = STATE_MENU;
+        forceMenuRender = true;
       }
       break;
 
@@ -499,14 +646,43 @@ void loop() {
             presentFrame(dma_display);
           }
 
-          ControllerPtr p1 = globalControllerManager->getController(0);
-          if (isStartPressed(p1)) {
-            delete currentGame;
-            currentGame = nullptr;
-            currentState = STATE_MENU;
-            dma_display->clearScreen();
-            forceMenuRender = true;
-            delay(300);  // Debounce START press
+          // -----------------------------------------------------
+          // GAME OVER button mapping (global, consistent):
+          // - A: new game
+          // - B: back to menu
+          // - START: back to menu (nothing to pause)
+          // -----------------------------------------------------
+          // IMPORTANT: We still evaluate edges every frame so holding a button
+          // doesn't trigger immediately when the game-over state appears.
+          const bool isOver = currentGame->isGameOver();
+          const int8_t aPad = firstPadWithAEdge(globalControllerManager);
+          const int8_t bPad = firstPadWithBEdge(globalControllerManager);
+          const int8_t startPad = firstPadWithStartEdge(globalControllerManager);
+
+          if (isOver) {
+            if (aPad >= 0) {
+              currentGame->reset();
+              currentGameRunId++; // treat as a new run for leaderboard submission
+              forceGameRender = true;
+              delay(250);
+            } else if (bPad >= 0 || startPad >= 0) {
+              if (startPad >= 0) globalAudio.uiStartStop();
+              delete currentGame;
+              currentGame = nullptr;
+              currentState = STATE_MENU;
+              dma_display->clearScreen();
+              forceMenuRender = true;
+              delay(300);
+            }
+          } else {
+            // START in-game: open the pause menu (do NOT exit the game).
+            if (startPad >= 0) {
+              globalAudio.uiStartStop();
+              pauseMenu.beginForPad((uint8_t)startPad);
+              currentState = STATE_PAUSE;
+              forceGameRender = true;
+              delay(300);  // Debounce START press
+            }
           }
         }
       }

@@ -8,7 +8,7 @@
 // -----------------------------------------------------------------------------
 #pragma once
 
-#include "../../config.h" // COLOR_* constants
+#include "../../engine/config.h" // COLOR_* constants
 
 // Brick shading multipliers for a simple "3D" look.
 // Index 0..2 is used as: top highlight, mid, bottom shade.

@@ -1,14 +1,16 @@
 #pragma once
 #include <Arduino.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include "../../GameBase.h"
-#include "../../ControllerManager.h"
-#include "../../config.h"
-#include "../../SmallFont.h"
-#include "../../Settings.h"
-#include "../../UserProfiles.h"
-#include "../../GameOverLeaderboardView.h"
+#include "../../engine/GameBase.h"
+#include "../../engine/ControllerManager.h"
+#include "../../engine/config.h"
+#include "../../engine/AudioManager.h"
+#include "../../component/SmallFont.h"
+#include "../../engine/Settings.h"
+#include "../../engine/UserProfiles.h"
+#include "../../component/GameOverLeaderboardView.h"
 #include "BreakoutGameConfig.h"
+#include "BreakoutGameAudio.h"
 
 /**
  * BreakoutGame - Breakout/Arkanoid style game (modernized).
@@ -47,6 +49,28 @@ private:
     }
 
     // ---------------------------------------------------------
+    // Audio helpers (buzzer via engine/AudioManager)
+    // ---------------------------------------------------------
+    static inline bool sfxAllowedNow() {
+        // Avoid consuming cooldown timers while Sound is OFF or volume is muted.
+        return globalSettings.isSoundEnabled() && globalSettings.getSoundVolumeLevel() > 0;
+    }
+
+    static inline void playSfxPatternCooldown(
+        const AudioManager::Step* steps,
+        uint8_t stepCount,
+        uint16_t cooldownMs,
+        uint32_t now,
+        uint32_t& lastMs
+    ) {
+        if (!steps || stepCount == 0) return;
+        if (!sfxAllowedNow()) return;
+        if ((int32_t)(now - lastMs) < (int32_t)cooldownMs) return;
+        lastMs = now;
+        globalAudio.playPattern(steps, stepCount);
+    }
+
+    // ---------------------------------------------------------
     // Tuning (BreakoutGameConfig.h)
     // ---------------------------------------------------------
     static constexpr float STICK_DEADZONE = BreakoutGameConfig::STICK_DEADZONE;
@@ -66,6 +90,9 @@ private:
 
     static constexpr int BALL_SIZE_PX = BreakoutGameConfig::BALL_SIZE_PX;
     static inline float ballHalf() { return BreakoutGameConfig::BALL_HALF; }
+    static constexpr float BALL_SPEED = BreakoutGameConfig::BALL_SPEED;
+    static constexpr float BALL_SHOT_MULT = BreakoutGameConfig::BALL_SHOT_MULT;
+    static constexpr float BALL_MAX_SPEED = BreakoutGameConfig::BALL_MAX_SPEED;
 
     static constexpr int MAX_BALLS = BreakoutGameConfig::MAX_BALLS;
     static constexpr int MAX_BRICKS = BreakoutGameConfig::MAX_BRICKS;
@@ -162,6 +189,19 @@ private:
     uint32_t lastScrollMs = 0;
     uint32_t lastRowSpawnMs = 0;
 
+    struct SfxState {
+        uint32_t lastIntroMs = 0;
+        uint32_t lastLaunchMs = 0;
+        uint32_t lastPaddleMs = 0;
+        uint32_t lastBrickHitMs = 0;
+        uint32_t lastBrickBreakMs = 0;
+        uint32_t lastPickupMs = 0;
+        uint32_t lastShieldMs = 0;
+        uint32_t lastLifeLostMs = 0;
+        uint32_t lastAllClearMs = 0;
+        uint32_t lastGameOverMs = 0;
+    } sfx;
+
     // ---------------------------------------------------------
     // Small helpers
     // ---------------------------------------------------------
@@ -229,19 +269,14 @@ private:
     }
 
     float baseBallSpeed() const {
-        // Base ball speed scales with level, but the very start should be calmer.
-        // NOTE: We also clamp the actual ball velocity after collisions to prevent
-        // rare runaway spikes.
-        float s = 1.00f + 0.018f * (float)min(18, max(0, level - 1));
-        if (level <= 1) s *= 0.42f; // a bit slower at start (requested)
-        return s;
+        // IMPORTANT: Do not scale ball speed with level.
+        // Level increases should affect brick difficulty / stream pacing only.
+        return BALL_SPEED;
     }
 
     float maxBallSpeed() const {
-        // Safety clamp: prevents the ball from feeling "too fast" after paddle hits.
-        // Keep some progression, but cap hard for 64×64 readability.
-        const float s = 1.32f + 0.02f * (float)min(12, max(0, level - 1));
-        return min(1.65f, s);
+        // Safety clamp: prevents the ball from feeling "too fast" after collisions.
+        return BALL_MAX_SPEED;
     }
 
     uint8_t brickHpForSpawn() const {
@@ -337,20 +372,21 @@ private:
         }
     }
 
-    void launchOneAttachedBall(uint8_t owner, bool preferStraightShot) {
+    bool launchOneAttachedBall(uint8_t owner, bool preferStraightShot) {
         const float sp = baseBallSpeed();
         for (int i = 0; i < MAX_BALLS; i++) {
             Ball& b = balls[i];
             if (!b.active || !b.attached || b.owner != owner) continue;
             b.attached = false;
             const bool shot = preferStraightShot || b.shotStyle;
-            const float s = shot ? (sp * 1.35f) : sp;
+            const float s = shot ? (sp * BALL_SHOT_MULT) : sp;
             b.vy = -s;
             b.vx = shot ? 0.0f : ((random(0, 2) == 0) ? -s : s);
             b.shotStyle = shot;
             b.color = COLOR_WHITE;
-            return;
+            return true;
         }
+        return false;
     }
 
     void clampBallSpeed(Ball& b) const {
@@ -450,6 +486,14 @@ private:
 
         // Small celebration burst (cheap, visible).
         spawnParticles((float)(PANEL_RES_X / 2), (float)(HUD_H + 6), COLOR_YELLOW, 10, now);
+
+        playSfxPatternCooldown(
+            BreakoutGameAudio::SFX_ALL_CLEAR,
+            BreakoutGameAudio::SFX_ALL_CLEAR_N,
+            BreakoutGameConfig::SFX_ALL_CLEAR_COOLDOWN_MS,
+            now,
+            sfx.lastAllClearMs
+        );
 
         return true;
     }
@@ -635,6 +679,19 @@ private:
 
                 if ((int)pu.y >= py - 1 && (int)pu.y <= py + 1 &&
                     (int)pu.x >= px - 1 && (int)pu.x <= px + pw) {
+                    // Pickup SFX (type-specific).
+                    if (pu.type == PU_RED) {
+                        playSfxPatternCooldown(BreakoutGameAudio::SFX_PICKUP_RED, BreakoutGameAudio::SFX_PICKUP_RED_N, BreakoutGameConfig::SFX_PICKUP_COOLDOWN_MS, now, sfx.lastPickupMs);
+                    } else if (pu.type == PU_BLUE) {
+                        playSfxPatternCooldown(BreakoutGameAudio::SFX_PICKUP_BLUE, BreakoutGameAudio::SFX_PICKUP_BLUE_N, BreakoutGameConfig::SFX_PICKUP_COOLDOWN_MS, now, sfx.lastPickupMs);
+                    } else if (pu.type == PU_GREEN) {
+                        playSfxPatternCooldown(BreakoutGameAudio::SFX_PICKUP_GREEN, BreakoutGameAudio::SFX_PICKUP_GREEN_N, BreakoutGameConfig::SFX_PICKUP_COOLDOWN_MS, now, sfx.lastPickupMs);
+                    } else if (pu.type == PU_CYAN) {
+                        playSfxPatternCooldown(BreakoutGameAudio::SFX_PICKUP_CYAN, BreakoutGameAudio::SFX_PICKUP_CYAN_N, BreakoutGameConfig::SFX_PICKUP_COOLDOWN_MS, now, sfx.lastPickupMs);
+                    } else {
+                        playSfxPatternCooldown(BreakoutGameAudio::SFX_PICKUP_PURPLE, BreakoutGameAudio::SFX_PICKUP_PURPLE_N, BreakoutGameConfig::SFX_PICKUP_COOLDOWN_MS, now, sfx.lastPickupMs);
+                    }
+
                     if (pu.type == PU_PURPLE) triggerPurpleExplosion(now);
                     else if (pu.type == PU_CYAN) duplicateRandomBall(now);
                     else applyPowerupToPlayer((uint8_t)pi, pu.type, now);
@@ -658,6 +715,15 @@ private:
         bricksDestroyed++;
         recomputeLevel();
         spawnParticles(cx, cy, b.baseColor, (uint8_t)random(4, 8), now);
+
+        playSfxPatternCooldown(
+            BreakoutGameAudio::SFX_BRICK_BREAK,
+            BreakoutGameAudio::SFX_BRICK_BREAK_N,
+            BreakoutGameConfig::SFX_BRICK_BREAK_COOLDOWN_MS,
+            now,
+            sfx.lastBrickBreakMs
+        );
+
         // Strong sideways kick to make powerups harder to catch.
         const float kickVx = ((float)random(-100, 101) / 100.0f) * 0.70f;  // -0.70..0.70 (a bit lighter/slower)
         const float kickVy = -(((float)random(20, 80) / 100.0f) * 0.10f);   // -0.020..-0.080
@@ -672,13 +738,20 @@ private:
     // Life handling
     // ---------------------------------------------------------
     void loseLife(uint8_t playerIdx, uint32_t now) {
-        (void)now;
         if (playerIdx >= MAX_GAMEPADS) return;
         Player& p = players[playerIdx];
         if (!p.enabled || p.lives <= 0) return;
         p.lives--;
         if (p.lives < 0) p.lives = 0;
         if (p.lives > 0) (void)spawnHeldBall(playerIdx, false);
+
+        playSfxPatternCooldown(
+            BreakoutGameAudio::SFX_LIFE_LOST,
+            BreakoutGameAudio::SFX_LIFE_LOST_N,
+            BreakoutGameConfig::SFX_LIFE_LOST_COOLDOWN_MS,
+            now,
+            sfx.lastLifeLostMs
+        );
     }
 
     // ---------------------------------------------------------
@@ -703,7 +776,7 @@ private:
         }
     }
 
-    void handleLaunchInputs(ControllerManager* input) {
+    void handleLaunchInputs(ControllerManager* input, uint32_t now) {
         // During countdown: players can move but cannot launch.
         if (phase != PHASE_PLAYING) return;
 
@@ -714,7 +787,16 @@ private:
             if (!(ctl && ctl->isConnected())) continue;
             if (ctl->a()) {
                 // Release exactly one attached ball for this player.
-                launchOneAttachedBall((uint8_t)i, false);
+                const bool launched = launchOneAttachedBall((uint8_t)i, false);
+                if (launched) {
+                    playSfxPatternCooldown(
+                        BreakoutGameAudio::SFX_LAUNCH,
+                        BreakoutGameAudio::SFX_LAUNCH_N,
+                        BreakoutGameConfig::SFX_LAUNCH_COOLDOWN_MS,
+                        now,
+                        sfx.lastLaunchMs
+                    );
+                }
             }
         }
     }
@@ -750,6 +832,14 @@ private:
                     floorShieldArmed = false;
                     spawnParticles(ball.x, ball.y, COLOR_BLUE, 10, now);
                     clampBallSpeed(ball);
+
+                    playSfxPatternCooldown(
+                        BreakoutGameAudio::SFX_SHIELD_BOUNCE,
+                        BreakoutGameAudio::SFX_SHIELD_BOUNCE_N,
+                        BreakoutGameConfig::SFX_SHIELD_COOLDOWN_MS,
+                        now,
+                        sfx.lastShieldMs
+                    );
                 }
             }
 
@@ -766,6 +856,14 @@ private:
                     ball.owner = (uint8_t)pi;
                     bounceBallOffPaddle(ball, p);
                     ball.y = (float)py - h;
+
+                    playSfxPatternCooldown(
+                        BreakoutGameAudio::SFX_PADDLE_HIT,
+                        BreakoutGameAudio::SFX_PADDLE_HIT_N,
+                        BreakoutGameConfig::SFX_PADDLE_HIT_COOLDOWN_MS,
+                        now,
+                        sfx.lastPaddleMs
+                    );
                     break;
                 }
             }
@@ -789,6 +887,13 @@ private:
                 clampBallSpeed(ball);
 
                 spawnParticles(brickCenterX, brickCenterY, br.baseColor, 4, now);
+                playSfxPatternCooldown(
+                    BreakoutGameAudio::SFX_BRICK_HIT,
+                    BreakoutGameAudio::SFX_BRICK_HIT_N,
+                    BreakoutGameConfig::SFX_BRICK_HIT_COOLDOWN_MS,
+                    now,
+                    sfx.lastBrickHitMs
+                );
                 if (br.hp == 0) destroyBrick(br, now, ball.owner);
                 break;
             }
@@ -957,6 +1062,11 @@ public:
         for (int i = 0; i < MAX_GAMEPADS; i++) if (players[i].enabled) (void)spawnHeldBall((uint8_t)i, false);
         // Ensure all attached balls are snapped to their paddles immediately.
         updateAttachedBalls();
+
+        // Start a short, non-looping intro sting (AudioManager no-ops if Sound is OFF).
+        globalAudio.stopRtttl();
+        globalAudio.playRtttl(BreakoutGameAudio::MUSIC_INTRO_RTTTL, /*loop=*/false);
+        sfx = SfxState{};
     }
 
     void reset() override {
@@ -975,7 +1085,7 @@ public:
 
         updatePlayers(input);
         updateAttachedBalls();
-        handleLaunchInputs(input);
+        handleLaunchInputs(input, now);
 
         updateBallsAndCollisions(now);
         updatePurpleExplosions(now);
@@ -993,6 +1103,14 @@ public:
         if (alivePlayerCount() <= 0) {
             gameOver = true;
             phase = PHASE_GAME_OVER;
+
+            playSfxPatternCooldown(
+                BreakoutGameAudio::SFX_GAME_OVER,
+                BreakoutGameAudio::SFX_GAME_OVER_N,
+                BreakoutGameConfig::SFX_GAME_OVER_COOLDOWN_MS,
+                now,
+                sfx.lastGameOverMs
+            );
         }
     }
 

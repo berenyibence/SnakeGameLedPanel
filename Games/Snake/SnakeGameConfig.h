@@ -12,7 +12,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include "../../config.h"
+#include "../../engine/config.h"
 
 namespace SnakeGameConfig {
 

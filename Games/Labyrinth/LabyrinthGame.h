@@ -1,13 +1,13 @@
 #pragma once
 #include <Arduino.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include "../../GameBase.h"
-#include "../../ControllerManager.h"
-#include "../../config.h"
-#include "../../SmallFont.h"
-#include "../../Settings.h"
-#include "../../UserProfiles.h"
-#include "../../GameOverLeaderboardView.h"
+#include "../../engine/GameBase.h"
+#include "../../engine/ControllerManager.h"
+#include "../../engine/config.h"
+#include "../../component/SmallFont.h"
+#include "../../engine/Settings.h"
+#include "../../engine/UserProfiles.h"
+#include "../../component/GameOverLeaderboardView.h"
 #include "LabyrinthGameConfig.h"
 
 /**
@@ -26,31 +26,57 @@ private:
     static constexpr int MAX_MAZE_H = LabyrinthGameConfig::MAX_MAZE_H;   // 64 (we'll use less due to HUD)
     static constexpr int MAX_CELLS = MAX_MAZE_W * MAX_MAZE_H; // 4096
 
-    // Player structure (analog movement with robust grid collision)
+    // Player structure (INTEGER-ONLY fixed-point movement + pixel-accurate collision)
     struct Player {
-        float x;     // position in playfield pixels (0..mazeW*cellSizePx)
-        float y;     // position in playfield pixels (0..mazeH*cellSizePx)
-        float vx;    // velocity px/s
-        float vy;    // velocity px/s
-        float radiusPx;
-        float maxSpeedPxPerS;
+        // Top-left position in screen pixels, in 8.8 fixed-point.
+        // (x_fp >> 8) gives integer pixel coordinate.
+        int32_t x_fp;
+        int32_t y_fp;
+
+        // Velocity in 8.8 fixed-point pixels PER TICK (not per second).
+        int32_t vx_fp;
+        int32_t vy_fp;
+
+        // Max speed in px/s (integer). We derive per-tick velocity from this.
+        uint16_t maxSpeedPxPerS;
         uint16_t color;
         uint8_t sizePx;      // draw size (>=1)
         
         Player()
-            : x(0.0f), y(0.0f),
-              vx(0.0f), vy(0.0f),
-              radiusPx(1.0f), maxSpeedPxPerS(28.0f),
+            : x_fp(0), y_fp(0),
+              vx_fp(0), vy_fp(0),
+              maxSpeedPxPerS(28),
               color(COLOR_GREEN), sizePx(2) {}
     };
     
     Player player;
     bool gameOver;
-    bool gameWon;
     int level;
     unsigned long lastUpdate;
-    unsigned long winTime;
+    unsigned long levelCompleteTime;
     static constexpr int UPDATE_INTERVAL_MS = LabyrinthGameConfig::UPDATE_INTERVAL_MS;  // ~60 FPS (render is capped by engine)
+
+    // Score / timer
+    uint32_t score = 0;
+    uint32_t levelStartTimeMs = 0;
+    uint16_t cachedSecondsLeft = 60;
+
+    // Level transition (NOT game over)
+    bool levelComplete = false;
+    uint16_t secondsLeftAtComplete = 0;
+    enum LevelCompletePhase : uint8_t {
+        PHASE_CLEAR_ANIM = 0,
+        PHASE_TEXT = 1
+    };
+    LevelCompletePhase levelPhase = PHASE_CLEAR_ANIM;
+
+    // Brightness fade animation (used for outro fade-out and intro fade-in).
+    // IMPORTANT: HUD must not be affected.
+    // We fade ONLY the labyrinth drawing area by scaling colors toward black.
+    enum AnimMode : uint8_t { ANIM_NONE = 0, ANIM_FADE_OUT = 1, ANIM_FADE_IN = 2 };
+    AnimMode animMode = ANIM_NONE;
+    uint32_t animStartMs = 0;
+    uint16_t animDurationMs = 0;
 
     // Dynamic maze sizing based on level difficulty:
     // - Levels 1..10: 4x4 tiles (easy)
@@ -71,10 +97,12 @@ private:
     // (BSS), and we pack (x,y) into a single uint16_t cell index to keep memory low.
 
     // Analog input smoothing / deadzone
-    static constexpr float STICK_DEADZONE = LabyrinthGameConfig::STICK_DEADZONE; // 0..1
-    static constexpr float VEL_SMOOTH = LabyrinthGameConfig::VEL_SMOOTH;         // 0..1 (higher = snappier)
-    static constexpr float STOP_FRICTION = LabyrinthGameConfig::STOP_FRICTION;   // per tick when no input
     static constexpr int16_t AXIS_DIVISOR = LabyrinthGameConfig::AXIS_DIVISOR;   // Bluepad32 commonly ~[-512..512]
+    static constexpr int16_t STICK_DEADZONE_RAW = LabyrinthGameConfig::STICK_DEADZONE_RAW;
+    static constexpr uint8_t VEL_SMOOTH_NUM = LabyrinthGameConfig::VEL_SMOOTH_NUM;
+    static constexpr uint8_t VEL_SMOOTH_DEN = LabyrinthGameConfig::VEL_SMOOTH_DEN;
+    static constexpr uint8_t STOP_FRICTION_NUM = LabyrinthGameConfig::STOP_FRICTION_NUM;
+    static constexpr uint8_t STOP_FRICTION_DEN = LabyrinthGameConfig::STOP_FRICTION_DEN;
     
     /**
      * Generate a simple maze using depth-first carve for smoother paths
@@ -94,20 +122,75 @@ private:
         static int16_t axisY(T*, ...) { return 0; }
     };
 
-    static inline float clampf(float v, float lo, float hi) { return (v < lo) ? lo : (v > hi) ? hi : v; }
+    // Fixed-point helpers (8.8)
+    static constexpr int FP_SHIFT = 8;
+    static constexpr int32_t FP_ONE = (1 << FP_SHIFT);
+    static inline int32_t toFp(int32_t px) { return (px << FP_SHIFT); }
+    static inline int32_t fpToIntFloor(int32_t vfp) { return (vfp >> FP_SHIFT); }
+    static inline int32_t fpAbs(int32_t v) { return (v < 0) ? -v : v; }
+    static inline int32_t fpSign(int32_t v) { return (v < 0) ? -1 : (v > 0) ? 1 : 0; }
 
-    static inline float deadzone01(float v, float dz) {
-        const float a = fabsf(v);
-        if (a <= dz) return 0.0f;
-        const float s = (a - dz) / (1.0f - dz);
-        return (v < 0) ? -s : s;
+    // ---------------------------------------------------------
+    // Pixel-accurate collision mask (what you see is what you collide with)
+    // ---------------------------------------------------------
+    // solid[y][x] is 1 if that SCREEN pixel is solid (wall/outside maze/HUD),
+    // and 0 if it is walkable.
+    //
+    // Why this approach:
+    // - It guarantees physics matches visuals 1:1 on a 64x64 panel.
+    // - It is simple and robust across different `cellSizePx` values and centering offsets.
+    // - Memory is tiny: 64*64 = 4096 bytes.
+    uint8_t solid[PANEL_RES_Y][PANEL_RES_X];
+
+    void buildSolidMaskFromMaze() {
+        // Default: everything solid. Then carve out walkable path pixels.
+        for (int y = 0; y < PANEL_RES_Y; y++) {
+            for (int x = 0; x < PANEL_RES_X; x++) {
+                solid[y][x] = 1;
+            }
+        }
+
+        // Maze is only drawn below HUD.
+        for (int my = 0; my < mazeH; my++) {
+            for (int mx = 0; mx < mazeW; mx++) {
+                const bool walkable = (maze[my][mx] != 0);
+                const int sx0 = mazeOriginX + mx * cellSizePx;
+                const int sy0 = mazeOriginY + my * cellSizePx;
+                for (int py = 0; py < cellSizePx; py++) {
+                    const int sy = sy0 + py;
+                    if (sy < 0 || sy >= PANEL_RES_Y) continue;
+                    for (int px = 0; px < cellSizePx; px++) {
+                        const int sx = sx0 + px;
+                        if (sx < 0 || sx >= PANEL_RES_X) continue;
+                        solid[sy][sx] = walkable ? 0 : 1;
+                    }
+                }
+            }
+        }
     }
 
-    static inline void normalizeStick(int16_t rawX, int16_t rawY, float& outX, float& outY) {
-        const float x = clampf((float)rawX / (float)AXIS_DIVISOR, -1.0f, 1.0f);
-        const float y = clampf((float)rawY / (float)AXIS_DIVISOR, -1.0f, 1.0f);
-        outX = deadzone01(x, STICK_DEADZONE);
-        outY = deadzone01(y, STICK_DEADZONE);
+    static inline int16_t applyDeadzoneRaw(int16_t v, int16_t dz) {
+        if (v > -dz && v < dz) return 0;
+        return v;
+    }
+
+    static inline int8_t signNonZero(int16_t v) {
+        return (v < 0) ? -1 : (v > 0) ? 1 : 0;
+    }
+
+    static inline int32_t computeMaxStepPerTickFp(uint16_t speedPxPerS) {
+        // Convert px/s -> px/tick in 8.8 fixed-point:
+        // step_fp = speed * 256 * dt_ms / 1000
+        // Keep it in 32-bit to avoid overflow.
+        const uint32_t dt = (uint32_t)UPDATE_INTERVAL_MS;
+        const uint32_t numer = (uint32_t)speedPxPerS * (uint32_t)FP_ONE * dt;
+        return (int32_t)(numer / 1000UL);
+    }
+
+    static inline int32_t lerpInt32(int32_t cur, int32_t target, uint8_t num, uint8_t den) {
+        // cur += (target-cur) * num / den
+        const int32_t delta = target - cur;
+        return cur + (int32_t)((int64_t)delta * (int64_t)num / (int64_t)den);
     }
 
     void computeMazeDimensions() {
@@ -380,148 +463,131 @@ private:
         maze[startY][startX] = 2;
         maze[exitY][exitX] = 3;
 
-        // Reset player position (center of start cell, in playfield coords)
-        player.x = (startX + 0.5f) * cellSizePx;
-        player.y = (startY + 0.5f) * cellSizePx;
-        player.vx = 0.0f;
-        player.vy = 0.0f;
+        // Reset player position (TOP-LEFT of the player rect, in SCREEN coords)
+        // Center the player inside the start tile.
+        const int startCellXpx = mazeOriginX + startX * cellSizePx;
+        const int startCellYpx = mazeOriginY + startY * cellSizePx;
+        const int px = startCellXpx + (cellSizePx - (int)player.sizePx) / 2;
+        const int py = startCellYpx + (cellSizePx - (int)player.sizePx) / 2;
+        player.x_fp = toFp(px);
+        player.y_fp = toFp(py);
+        player.vx_fp = 0;
+        player.vy_fp = 0;
 
         // Movement tuning per tile size:
         // Keep 1x1 playable by being slower (precision), while 4x4 can be faster.
-        const float baseSpeed = (cellSizePx == 4) ? 34.0f : (cellSizePx == 2) ? 28.0f : 22.0f;
-        player.maxSpeedPxPerS = min(42.0f, baseSpeed + (float)level * 0.25f);
-
-        // Collision radius: small enough for narrow corridors, large enough to feel solid.
-        player.radiusPx = (cellSizePx == 1) ? 0.35f : (cellSizePx == 2) ? 0.60f : 0.90f;
+        const uint16_t baseSpeed = (cellSizePx == 4) ? 34 : (cellSizePx == 2) ? 28 : 22;
+        // +1 px/s per 4 levels (integer-only)
+        const uint16_t lvlBonus = (uint16_t)(level / 4);
+        player.maxSpeedPxPerS = (uint16_t)min<uint16_t>(42, (uint16_t)(baseSpeed + lvlBonus));
 
         // Draw size: match tile size in small modes.
         player.sizePx = (uint8_t)((cellSizePx <= 2) ? cellSizePx : 2);
+
+        // Rebuild pixel-accurate collision after any maze changes.
+        buildSolidMaskFromMaze();
     }
     
-    /**
-     * Check if position is valid (not a wall)
-     */
-    bool isWalkableCell(int x, int y) const {
-        if (!isInBounds(x, y)) return false;
-        return maze[y][x] != 0;
-    }
-    
-    bool collidesAt(float px, float py) const {
-        // Collision model: axis-aligned square centered at (px, py) with size = player.sizePx.
-        // This keeps visuals and physics perfectly aligned and avoids directional bias.
-        const float half = (float)player.sizePx * 0.5f;
+    bool collidesRectAtFp(int32_t x_fp, int32_t y_fp) const {
+        // Collision model: AABB (top-left) with integer pixel coverage:
+        // [x, x+size-1] and [y, y+size-1] are solid-tested.
+        const int x = (int)fpToIntFloor(x_fp);
+        const int y = (int)fpToIntFloor(y_fp);
+        const int maxX = x + (int)player.sizePx - 1;
+        const int maxY = y + (int)player.sizePx - 1;
 
-        // Treat bounds as [min, max) (exclusive max) to allow "touching" walls with no gap.
-        static constexpr float EDGE_EPS = 0.0001f;
-        const int minX = (int)floorf((px - half) / (float)cellSizePx);
-        const int maxX = (int)floorf((px + half - EDGE_EPS) / (float)cellSizePx);
-        const int minY = (int)floorf((py - half) / (float)cellSizePx);
-        const int maxY = (int)floorf((py + half - EDGE_EPS) / (float)cellSizePx);
+        if (x < 0 || y < 0 || maxX >= PANEL_RES_X || maxY >= PANEL_RES_Y) return true;
 
-        for (int cy = minY; cy <= maxY; cy++) {
-            for (int cx = minX; cx <= maxX; cx++) {
-                if (!isInBounds(cx, cy)) return true; // treat out-of-bounds as wall
-                if (maze[cy][cx] == 0) return true;
+        for (int py = y; py <= maxY; py++) {
+            for (int px = x; px <= maxX; px++) {
+                if (solid[py][px]) return true;
             }
         }
         return false;
     }
 
     /**
-     * Resolve movement along X against wall cells (AABB vs grid).
-     * This prevents clipping and avoids leaving a 1px gap on any side.
-     */
-    void resolveMoveX(float targetX) {
-        if (targetX == player.x) return;
-
-        const float half = (float)player.sizePx * 0.5f;
-        static constexpr float EDGE_EPS = 0.0001f;
-
-        const bool movingRight = (targetX > player.x);
-        const float leadEdge = movingRight ? (targetX + half) : (targetX - half);
-        const float leadEdgeAdj = leadEdge + (movingRight ? -EDGE_EPS : EDGE_EPS);
-        const int leadCellX = (int)floorf(leadEdgeAdj / (float)cellSizePx);
-
-        const int minY = (int)floorf((player.y - half) / (float)cellSizePx);
-        const int maxY = (int)floorf((player.y + half - EDGE_EPS) / (float)cellSizePx);
-
-        // If the leading column contains ANY wall tile in our vertical span, clamp to its boundary.
-        for (int cy = minY; cy <= maxY; cy++) {
-            if (!isInBounds(leadCellX, cy) || maze[cy][leadCellX] == 0) {
-                if (movingRight) {
-                    // Wall cell's left boundary is at leadCellX * cellSizePx.
-                    player.x = (float)(leadCellX * cellSizePx) - half;
-                } else {
-                    // Wall cell's right boundary is at (leadCellX + 1) * cellSizePx.
-                    player.x = (float)((leadCellX + 1) * cellSizePx) + half;
-                }
-                player.vx = 0.0f;
-                return;
-            }
-        }
-
-        // No collision: accept movement.
-        player.x = targetX;
-    }
-
-    /**
-     * Resolve movement along Y against wall cells (AABB vs grid).
-     */
-    void resolveMoveY(float targetY) {
-        if (targetY == player.y) return;
-
-        const float half = (float)player.sizePx * 0.5f;
-        static constexpr float EDGE_EPS = 0.0001f;
-
-        const bool movingDown = (targetY > player.y);
-        const float leadEdge = movingDown ? (targetY + half) : (targetY - half);
-        const float leadEdgeAdj = leadEdge + (movingDown ? -EDGE_EPS : EDGE_EPS);
-        const int leadCellY = (int)floorf(leadEdgeAdj / (float)cellSizePx);
-
-        const int minX = (int)floorf((player.x - half) / (float)cellSizePx);
-        const int maxX = (int)floorf((player.x + half - EDGE_EPS) / (float)cellSizePx);
-
-        for (int cx = minX; cx <= maxX; cx++) {
-            if (!isInBounds(cx, leadCellY) || maze[leadCellY][cx] == 0) {
-                if (movingDown) {
-                    player.y = (float)(leadCellY * cellSizePx) - half;
-                } else {
-                    player.y = (float)((leadCellY + 1) * cellSizePx) + half;
-                }
-                player.vy = 0.0f;
-                return;
-            }
-        }
-
-        player.y = targetY;
-    }
-
-    /**
      * Check if player reached exit
      */
     bool checkExit() {
-        const int cx = (int)(player.x / (float)cellSizePx);
-        const int cy = (int)(player.y / (float)cellSizePx);
-        return (cx == exitX && cy == exitY);
+        // Use the player's center pixel for exit detection (integer-only).
+        const int px = fpToIntFloor(player.x_fp) + (int)player.sizePx / 2;
+        const int py = fpToIntFloor(player.y_fp) + (int)player.sizePx / 2;
+
+        const int localX = px - mazeOriginX;
+        const int localY = py - mazeOriginY;
+        if (localX < 0 || localY < 0) return false;
+        const int cx = localX / cellSizePx;
+        const int cy = localY / cellSizePx;
+        if (!isInBounds(cx, cy)) return false;
+        return (maze[cy][cx] == 3);
+    }
+
+    uint16_t computeSecondsLeft(uint32_t nowMs) {
+        if (levelStartTimeMs == 0) return 60;
+        const uint32_t elapsed = (uint32_t)(nowMs - levelStartTimeMs);
+        if (elapsed >= LabyrinthGameConfig::LEVEL_TIME_MS) return 0;
+        const uint32_t leftMs = LabyrinthGameConfig::LEVEL_TIME_MS - elapsed;
+        // Round up so the player sees "60" at the start and gets credit for partial seconds.
+        const uint16_t s = (uint16_t)((leftMs + 999UL) / 1000UL);
+        return (s > 60) ? 60 : s;
+    }
+
+    static inline uint16_t scaleColor565(uint16_t c, uint8_t alpha) {
+        // Scale an RGB565 color toward black using alpha in [0..255].
+        // 0 -> black, 255 -> original color.
+        const uint16_t r5 = (uint16_t)((c >> 11) & 0x1Fu);
+        const uint16_t g6 = (uint16_t)((c >> 5) & 0x3Fu);
+        const uint16_t b5 = (uint16_t)(c & 0x1Fu);
+
+        const uint16_t r5s = (uint16_t)((r5 * (uint16_t)alpha + 127u) / 255u);
+        const uint16_t g6s = (uint16_t)((g6 * (uint16_t)alpha + 127u) / 255u);
+        const uint16_t b5s = (uint16_t)((b5 * (uint16_t)alpha + 127u) / 255u);
+        return (uint16_t)((r5s << 11) | (g6s << 5) | b5s);
+    }
+
+    void beginFade(AnimMode mode, uint32_t nowMs, uint16_t durationMs) {
+        animMode = mode;
+        animStartMs = nowMs;
+        animDurationMs = durationMs;
+    }
+
+    uint8_t currentFadeAlpha(uint32_t nowMs) const {
+        if (animMode == ANIM_NONE) return 255;
+        if (animDurationMs == 0) return 255;
+
+        const uint32_t elapsed = (uint32_t)(nowMs - animStartMs);
+        const uint32_t d = (uint32_t)animDurationMs;
+        const uint32_t clamped = (elapsed >= d) ? d : elapsed;
+        const uint8_t a = (uint8_t)((clamped * 255UL) / d); // 0..255
+        return (animMode == ANIM_FADE_OUT) ? (uint8_t)(255u - a) : a;
     }
 
 public:
     LabyrinthGame() 
-        : gameOver(false), gameWon(false), level(1), lastUpdate(0), winTime(0) {
+        : gameOver(false), level(1), lastUpdate(0), levelCompleteTime(0) {
         generateMaze();
     }
 
     void start() override {
         gameOver = false;
-        gameWon = false;
         level = 1;
+        score = 0;
         lastUpdate = millis();
-        winTime = 0;
+        // Timer begins after the intro fade-in (so the player doesn't lose time during the reveal).
+        levelStartTimeMs = 0;
+        cachedSecondsLeft = 60;
+        levelComplete = false;
+        levelCompleteTime = 0;
+        secondsLeftAtComplete = 0;
+        levelPhase = PHASE_CLEAR_ANIM;
+        animMode = ANIM_NONE;
 
         // Apply current global player color (chosen in the main menu).
         player.color = globalSettings.getPlayerColor();
 
         generateMaze();
+        beginFade(ANIM_FADE_IN, (uint32_t)lastUpdate, LabyrinthGameConfig::LEVEL_FADEIN_ANIM_MS);
     }
 
     void reset() override {
@@ -531,102 +597,198 @@ public:
     void update(ControllerManager* input) override {
         if (gameOver) return;
         
-        // If won, wait 800ms then advance to next level with new maze
-        if (gameWon) {
-            if (millis() - winTime > 800) {
-                gameWon = false;
-                level++;
-                generateMaze();
+        const uint32_t nowMs = (uint32_t)millis();
+
+        // Intro fade-in blocks gameplay and freezes timer until complete.
+        if (!levelComplete && animMode == ANIM_FADE_IN) {
+            if ((uint32_t)(nowMs - animStartMs) >= (uint32_t)animDurationMs) {
+                animMode = ANIM_NONE;
+                levelStartTimeMs = nowMs; // start the 60s clock AFTER reveal
+                cachedSecondsLeft = 60;
             }
+            return;
+        }
+
+        // Level complete transition:
+        // - brightness fade-out (labyrinth area only)
+        // - then show "COMPLETED" briefly
+        // - then next level + score award + brightness fade-in
+        if (levelComplete) {
+            const uint32_t elapsed = (uint32_t)(nowMs - (uint32_t)levelCompleteTime);
+            const uint32_t clearMs = (uint32_t)LabyrinthGameConfig::LEVEL_CLEAR_ANIM_MS;
+            const uint32_t textMs  = (uint32_t)LabyrinthGameConfig::LEVEL_COMPLETE_TEXT_MS;
+
+            if (elapsed < clearMs) {
+                levelPhase = PHASE_CLEAR_ANIM;
+                if (animMode != ANIM_FADE_OUT) beginFade(ANIM_FADE_OUT, (uint32_t)levelCompleteTime, LabyrinthGameConfig::LEVEL_CLEAR_ANIM_MS);
+                return;
+            }
+            if (elapsed < (clearMs + textMs)) {
+                levelPhase = PHASE_TEXT;
+                animMode = ANIM_NONE; // fully cleared at this point
+                return;
+            }
+
+            // Award: seconds remaining + 10 points for completing the labyrinth.
+            score += (uint32_t)secondsLeftAtComplete + 10UL;
+            level++;
+            levelStartTimeMs = 0; // will start after fade-in
+            cachedSecondsLeft = 60;
+            levelComplete = false;
+            levelPhase = PHASE_CLEAR_ANIM;
+            generateMaze();
+            beginFade(ANIM_FADE_IN, nowMs, LabyrinthGameConfig::LEVEL_FADEIN_ANIM_MS);
             return;
         }
         
         // Throttle updates
-        unsigned long now = millis();
-        if (now - lastUpdate < UPDATE_INTERVAL_MS) return;
-        lastUpdate = now;
+        if (nowMs - (uint32_t)lastUpdate < (uint32_t)UPDATE_INTERVAL_MS) return;
+        lastUpdate = nowMs;
+
+        // Timer (1 minute per level)
+        if (levelStartTimeMs != 0) {
+            cachedSecondsLeft = computeSecondsLeft(nowMs);
+            if (cachedSecondsLeft == 0) {
+                gameOver = true;
+                return;
+            }
+        }
         
         // Update player position (analog movement with collision against grid)
         ControllerPtr p1 = input->getController(0);
         if (p1 && p1->isConnected()) {
-            float sx = 0.0f, sy = 0.0f;
-            normalizeStick(InputDetail::axisX(p1, 0), InputDetail::axisY(p1, 0), sx, sy);
+            int16_t rawX = InputDetail::axisX(p1, 0);
+            int16_t rawY = InputDetail::axisY(p1, 0);
+            rawX = applyDeadzoneRaw(rawX, STICK_DEADZONE_RAW);
+            rawY = applyDeadzoneRaw(rawY, STICK_DEADZONE_RAW);
 
             // Fallback to dpad when stick is idle (nice for older controllers).
-            if (sx == 0.0f && sy == 0.0f) {
+            if (rawX == 0 && rawY == 0) {
                 const uint8_t d = p1->dpad();
-                if (d & 0x08) sx = -1.0f;
-                else if (d & 0x04) sx = 1.0f;
-                if (d & 0x01) sy = -1.0f;
-                else if (d & 0x02) sy = 1.0f;
+                if (d & 0x08) rawX = -(AXIS_DIVISOR);
+                else if (d & 0x04) rawX = (AXIS_DIVISOR);
+                if (d & 0x01) rawY = -(AXIS_DIVISOR);
+                else if (d & 0x02) rawY = (AXIS_DIVISOR);
             }
 
             // Maze movement feels best as 4-directional.
             // Allow analog sticks, but if the player is pushing diagonally, pick the dominant axis.
             // This prevents tiny off-axis drift that can block turning into intersections (especially in 2x2 mode).
-            if (sx != 0.0f && sy != 0.0f) {
-                if (fabsf(sx) >= fabsf(sy)) sy = 0.0f;
-                else sx = 0.0f;
+            if (rawX != 0 && rawY != 0) {
+                if (abs(rawX) >= abs(rawY)) rawY = 0;
+                else rawX = 0;
             }
 
-            // Target velocity (px/s) with smoothing.
-            const float targetVx = sx * player.maxSpeedPxPerS;
-            const float targetVy = sy * player.maxSpeedPxPerS;
-            player.vx = player.vx * (1.0f - VEL_SMOOTH) + targetVx * VEL_SMOOTH;
-            player.vy = player.vy * (1.0f - VEL_SMOOTH) + targetVy * VEL_SMOOTH;
+            const int8_t dirX = signNonZero(rawX);
+            const int8_t dirY = signNonZero(rawY);
+            const int32_t maxStep_fp = computeMaxStepPerTickFp(player.maxSpeedPxPerS);
 
-            // If there's no input, apply a little friction so we settle quickly.
-            if (targetVx == 0.0f) player.vx *= STOP_FRICTION;
-            if (targetVy == 0.0f) player.vy *= STOP_FRICTION;
+            const int32_t targetVx_fp = (int32_t)dirX * maxStep_fp;
+            const int32_t targetVy_fp = (int32_t)dirY * maxStep_fp;
+
+            // Integer-only velocity smoothing.
+            player.vx_fp = lerpInt32(player.vx_fp, targetVx_fp, VEL_SMOOTH_NUM, VEL_SMOOTH_DEN);
+            player.vy_fp = lerpInt32(player.vy_fp, targetVy_fp, VEL_SMOOTH_NUM, VEL_SMOOTH_DEN);
+
+            // If there's no input on an axis, apply a little friction so we settle quickly.
+            if (targetVx_fp == 0) player.vx_fp = (int32_t)((int64_t)player.vx_fp * STOP_FRICTION_NUM / STOP_FRICTION_DEN);
+            if (targetVy_fp == 0) player.vy_fp = (int32_t)((int64_t)player.vy_fp * STOP_FRICTION_NUM / STOP_FRICTION_DEN);
         }
 
-        // Integrate with a fixed dt based on UPDATE_INTERVAL_MS.
-        const float dt = (float)UPDATE_INTERVAL_MS / 1000.0f;
-        float nx = player.x + player.vx * dt;
-        float ny = player.y + player.vy * dt;
+        // Integrate fixed-point movement. We step in <= 1px chunks to avoid tunneling
+        // and to keep collision response exact at pixel granularity.
+        auto stepAxis = [&](bool xAxis) {
+            int32_t& pos_fp = xAxis ? player.x_fp : player.y_fp;
+            int32_t& vel_fp = xAxis ? player.vx_fp : player.vy_fp;
+            const int32_t other_fp = xAxis ? player.y_fp : player.x_fp;
 
-        // Axis-separated movement with deterministic collision resolution.
-        // This prevents both clipping and "1px gap" issues in any direction.
-        resolveMoveX(nx);
-        resolveMoveY(ny);
+            int32_t remaining = vel_fp;
+            while (remaining != 0) {
+                // Move at most 1 pixel per sub-step in the direction of travel.
+                const int32_t step = (fpAbs(remaining) > FP_ONE) ? (int32_t)(fpSign(remaining) * FP_ONE) : remaining;
+                const int32_t next_fp = pos_fp + step;
 
-        // Keep within playfield bounds (treat edges as walls), using the same AABB model.
-        const float half = (float)player.sizePx * 0.5f;
-        const float minPx = half;
-        const float maxPx = (float)(mazeW * cellSizePx) - half;
-        const float minPy = half;
-        const float maxPy = (float)(mazeH * cellSizePx) - half;
-        player.x = clampf(player.x, minPx, maxPx);
-        player.y = clampf(player.y, minPy, maxPy);
+                const bool hit = xAxis ? collidesRectAtFp(next_fp, other_fp) : collidesRectAtFp(other_fp, next_fp);
+                if (hit) {
+                    vel_fp = 0;
+                    return;
+                }
+                pos_fp = next_fp;
+                remaining -= step;
+            }
+        };
+
+        stepAxis(true);  // X
+        stepAxis(false); // Y
         
         // Check if reached exit
         if (checkExit()) {
-            gameWon = true;
-            winTime = millis();
+            levelComplete = true;
+            levelCompleteTime = nowMs;
+            secondsLeftAtComplete = cachedSecondsLeft;
+            levelPhase = PHASE_CLEAR_ANIM;
+            beginFade(ANIM_FADE_OUT, nowMs, LabyrinthGameConfig::LEVEL_CLEAR_ANIM_MS);
         }
     }
 
     void draw(MatrixPanel_I2S_DMA* display) override {
-        display->fillScreen(COLOR_BLACK);
-        
-        if (gameWon || gameOver) {
+        const uint32_t nowMs = (uint32_t)millis();
+
+        if (gameOver) {
+            display->fillScreen(COLOR_BLACK);
             char tag[4];
             UserProfiles::getPadTag(0, tag);
-            GameOverLeaderboardView::draw(display, gameWon ? "YOU WIN" : "GAME OVER", leaderboardId(), leaderboardScore(), tag);
+            GameOverLeaderboardView::draw(display, "GAME OVER", leaderboardId(), leaderboardScore(), tag);
+            return;
+        }
+
+        // Level complete text phase (after the clear animation)
+        if (levelComplete && levelPhase == PHASE_TEXT) {
+            // Keep HUD visible; only clear the labyrinth area.
+            // HUD
+            display->fillScreen(COLOR_BLACK);
+            SmallFont::drawStringF(display, 2, 6, COLOR_YELLOW, "S:%lu", (unsigned long)score);
+            char tbuf[10];
+            snprintf(tbuf, sizeof(tbuf), "T:%u", (unsigned int)cachedSecondsLeft);
+            const int approxCharW = 4;
+            const int tx = PANEL_RES_X - 2 - ((int)strlen(tbuf) * approxCharW);
+            SmallFont::drawString(display, tx, 6, tbuf, COLOR_CYAN);
+            for (int x = 0; x < PANEL_RES_X; x += 2) display->drawPixel(x, HUD_H-1, COLOR_BLUE);
+
+            // Labyrinth area (no HUD fade)
+            display->fillRect(mazeOriginX, mazeOriginY, mazeW * cellSizePx, mazeH * cellSizePx, COLOR_BLACK);
+            SmallFont::drawString(display, mazeOriginX + 10, mazeOriginY + 20, "COMPLETED", COLOR_GREEN);
+            SmallFont::drawStringF(display, mazeOriginX + 12, mazeOriginY + 30, COLOR_YELLOW, "+%u", (unsigned int)(secondsLeftAtComplete + 10));
             return;
         }
         
+        display->fillScreen(COLOR_BLACK);
+        
         // HUD
-        SmallFont::drawStringF(display, 2, 6, COLOR_YELLOW, "LVL:%d", level);
-        SmallFont::drawStringF(display, 44, 6, COLOR_CYAN, "%dx%d", cellSizePx, cellSizePx);
+        SmallFont::drawStringF(display, 2, 6, COLOR_YELLOW, "S:%lu", (unsigned long)score);
+
+        // Right-aligned timer (T:60 .. T:0)
+        char tbuf[10];
+        snprintf(tbuf, sizeof(tbuf), "T:%u", (unsigned int)cachedSecondsLeft);
+        const int approxCharW = 4; // TomThumb is ~3px wide with spacing; 4 is a good estimate.
+        const int tx = PANEL_RES_X - 2 - ((int)strlen(tbuf) * approxCharW);
+        SmallFont::drawString(display, tx, 6, tbuf, COLOR_CYAN);
 
         // Divider under HUD
         for (int x = 0; x < PANEL_RES_X; x += 2) display->drawPixel(x, HUD_H-1, COLOR_BLUE);
 
         // Softer colors for walls/exit (below HUD)
         uint16_t wallColor = display->color565(80, 120, 200);   // soft blue
-        uint16_t pathColor = display->color565(10, 20, 40);    // near black
-        uint16_t exitColor = display->color565(120, 220, 120); // soft green
+        uint16_t pathColor = display->color565(10, 20, 40);     // near black
+        uint16_t exitColor = display->color565(120, 220, 120);  // soft green
+
+        // Apply fade brightness ONLY to labyrinth content (not HUD).
+        const uint8_t a = currentFadeAlpha(nowMs);
+        if (a != 255) {
+            wallColor = scaleColor565(wallColor, a);
+            pathColor = scaleColor565(pathColor, a);
+            exitColor = scaleColor565(exitColor, a);
+        }
 
         // Draw maze
         for (int y = 0; y < mazeH; y++) {
@@ -648,19 +810,18 @@ public:
         }
         
         // Draw player
-        // Draw centered on the physics position (player.x/y is the center).
-        const int px = mazeOriginX + (int)(player.x - (float)player.sizePx * 0.5f);
-        const int py = mazeOriginY + (int)(player.y - (float)player.sizePx * 0.5f);
-        if (cellSizePx == 1) {
-            // 1x1 mode: draw single pixel at the center.
-            display->drawPixel(mazeOriginX + (int)player.x, mazeOriginY + (int)player.y, player.color);
-        } else {
-            display->fillRect(px, py, player.sizePx, player.sizePx, player.color);
-        }
+        const int px = fpToIntFloor(player.x_fp);
+        const int py = fpToIntFloor(player.y_fp);
+        const uint16_t playerColor = (a == 255) ? player.color : scaleColor565(player.color, a);
+        if (player.sizePx <= 1) display->drawPixel(px, py, playerColor);
+        else display->fillRect(px, py, player.sizePx, player.sizePx, playerColor);
     }
 
     bool isGameOver() override {
-        return gameOver || gameWon;
+        // IMPORTANT:
+        // - We only signal "game over" to the engine when the timer runs out.
+        // - Level completion is a transition and should NOT submit scores or end the run.
+        return gameOver;
     }
 
     // ------------------------------
@@ -670,9 +831,10 @@ public:
     const char* leaderboardId() const override { return "labyrinth"; }
     const char* leaderboardName() const override { return "Labyrinth"; }
     uint32_t leaderboardScore() const override {
-        // This game is progression-based; we treat "level reached" as the score.
-        // (Higher is better.)
-        return (level > 0) ? (uint32_t)level : 0u;
+        // Score-based run:
+        // - +10 for each completed labyrinth
+        // - +remaining seconds on the clock
+        return score;
     }
 };
 

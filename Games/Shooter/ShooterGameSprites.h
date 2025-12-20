@@ -10,7 +10,7 @@
 // -----------------------------------------------------------------------------
 #pragma once
 
-#include "../../config.h" // COLOR_* constants
+#include "../../engine/config.h" // COLOR_* constants
 #include <Arduino.h>
 
 // -----------------------------------------------------------------------------
@@ -108,12 +108,54 @@ static inline constexpr uint8_t CLOUD_SPRITES[CLOUD_SPRITE_COUNT][CLOUD_SPRITE_M
 };
 
 // -----------------------------------------------------------------------------
+// Powerup "lootbox" sprites (0..3 brightness maps)
+// -----------------------------------------------------------------------------
+// Powerups render as a small 2x2 mark for readability.
+// Values:
+// - 0: transparent
+// - 1: dim
+// - 2: medium
+// - 3: bright
+//
+// Type mapping (ShooterGame.h):
+// - 0: shield (blue)
+// - 1: weapon (red)
+// - 2: life (green)
+// - 3: rockets (purple)
+//
+// We keep each type's highlight in a different corner so you can tell them apart
+// even if the colors look similar on a given panel/brightness.
+static inline constexpr uint8_t POWERUP_SPRITES[POWERUP_TYPE_COUNT][POWERUP_SIZE_PX][POWERUP_SIZE_PX] = {
+    // 0: blue (highlight top-left)
+    { {3, 2},
+      {2, 1} },
+    // 1: red (highlight top-right)
+    { {2, 3},
+      {1, 2} },
+    // 2: green (highlight bottom-left)
+    { {2, 1},
+      {3, 2} },
+    // 3: purple (highlight bottom-right)
+    { {1, 2},
+      {2, 3} },
+    // 4: yellow (bright cross / coin)
+    { {2, 3},
+      {3, 2} },
+    // 5: cyan (bright diagonal)
+    { {3, 1},
+      {1, 3} },
+    // 6: white (bright frame / sparkle)
+    { {3, 3},
+      {3, 3} },
+};
+
+// -----------------------------------------------------------------------------
 // Ship / enemy / boss sprites (0..3 brightness maps) + palettes
 // -----------------------------------------------------------------------------
 static inline constexpr uint8_t SHIP_SPRITE[SHIP_H][SHIP_W] = {
     {0, 0, 3, 0, 0},
     {0, 3, 3, 3, 0},
-    {3, 3, 3, 3, 3},
+    {3, 3, 0, 3, 3},
     {3, 0, 3, 0, 3},
     {0, 0, 3, 0, 0},
 };

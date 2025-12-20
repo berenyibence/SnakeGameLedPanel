@@ -2,13 +2,14 @@
 #include <Arduino.h>
 #include <math.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include "../../GameBase.h"
-#include "../../ControllerManager.h"
-#include "../../config.h"
-#include "../../SmallFont.h"
-#include "../../Settings.h"
-#include "../../UserProfiles.h"
-#include "../../GameOverLeaderboardView.h"
+#include "../../engine/GameBase.h"
+#include "../../engine/ControllerManager.h"
+#include "../../engine/config.h"
+#include "../../engine/AudioManager.h"
+#include "../../component/SmallFont.h"
+#include "../../engine/Settings.h"
+#include "../../engine/UserProfiles.h"
+#include "../../component/GameOverLeaderboardView.h"
 #include "SnakeGameConfig.h"
 
 // Local aliases for readability (these are all tweakable in SnakeGameConfig.h)
@@ -340,6 +341,30 @@ private:
                 cell.y >= f.p.y && cell.y < f.p.y + (int)f.hCells);
     }
 
+    /**
+     * Minimal Snake movement SFX
+     * --------------------------
+     * Requirement:
+     * - Moving UP or LEFT must NOT produce a sound.
+     *
+     * Implementation:
+     * - We only play for Player 1 (pad index 0) to keep multiplayer from
+     *   becoming a wall of beeps.
+     * - We emit a tiny non-blocking tone once per movement tick when the
+     *   direction is RIGHT or DOWN.
+     *
+     * Notes:
+     * - `globalAudio` internally respects Settings.soundEnabled + volume.
+     */
+    static inline void playMoveSfxIfAllowed(const Snake& s) {
+        if (s.playerIndex != 0) return;                // minimal: only Player 1
+        if (s.dir == UP || s.dir == LEFT) return;      // explicit: no sound for UP/LEFT
+        if (s.dir != RIGHT && s.dir != DOWN) return;   // ignore NONE/unknown
+
+        // Short, subtle tick so it doesn't get annoying at higher speeds.
+        globalAudio.playTone(1320 /*Hz*/, 8 /*ms*/);
+    }
+
     void spawnFood(FoodKind kind = FOOD_APPLE) {
         bool ok;
         FoodItem f;
@@ -553,6 +578,9 @@ public:
 
             s.handleInput(ctl);
             s.dir = s.nextDir;
+
+            // Minimal movement SFX (RIGHT/DOWN only; no UP/LEFT).
+            playMoveSfxIfAllowed(s);
 
             Point head = s.body.head();
             Point nh = head;
