@@ -10,8 +10,8 @@
 class Menu : public ListModel {
 public:
     // Main menu options (actual indices). Keep Settings LAST (engine treats it specially).
-    const char* options[12] = { "Snake", "Tron", "Pong", "Breakout", "Shooter", "Labyrinth", "Tetris", "Asteroids", "Music", "MVisual", "Leaderboard", "Settings" };
-    static const int NUM_OPTIONS = 12;
+    const char* options[13] = { "Snake", "Tron", "Pong", "Breakout", "Shooter", "Labyrinth", "Tetris", "Asteroids", "Music", "MVisual", "Simon", "Leaderboard", "Settings" };
+    static const int NUM_OPTIONS = 13;
 
     // Reusable list widget state (selection + scrolling + input).
     ScrollableList list;

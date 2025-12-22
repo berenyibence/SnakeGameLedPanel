@@ -23,6 +23,7 @@
 #include "Games/Asteroids/AsteroidsGame.h"
 #include "Games/Music/MusicApp.h"
 #include "Games/MVisual/MVisualApp.h"
+#include "Games/Simon/SimonGame.h"
 #include "applet/Menu.h"
 #include "engine/EepromManager.h"
 #include "engine/Settings.h"
@@ -439,6 +440,9 @@ void loop() {
                 break;
               case 9:  // MVisual
                 currentGame = new MVisualApp();
+                break;
+              case 10: // Simon
+                currentGame = new SimonGame();
                 break;
               default:
                 currentGame = nullptr;

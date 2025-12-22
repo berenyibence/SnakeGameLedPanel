@@ -24,6 +24,8 @@ public:
         SETTING_GAME_SPEED,
         SETTING_SOUND,
         SETTING_SOUND_VOLUME,
+        SETTING_SIMON_DIFFICULTY,
+        SETTING_SIMON_LIVES,
         SETTING_RESET,
         SETTING_REBOOT,
         SETTING_ERASE_EEPROM,
@@ -208,7 +210,7 @@ private:
     // Settings list model (static strings + fixed ordering).
     class SettingsListModel : public ListModel {
     public:
-        const char* settingNames[NUM_SETTINGS] = { "Brightness", "Game Speed", "Sound", "Volume", "Reset", "Reboot", "EraseEEP", "Back" };
+        const char* settingNames[NUM_SETTINGS] = { "Brightness", "Game Speed", "Sound", "Volume", "Simon Diff", "Simon Lives", "Reset", "Reboot", "EraseEEP", "Back" };
         int itemCount() const override { return NUM_SETTINGS; }
         const char* label(int actualIndex) const override { return settingNames[actualIndex]; }
     };
@@ -241,6 +243,14 @@ private:
             // Volume level: 0..10
             char val[4];
             snprintf(val, sizeof(val), "%d", (int)globalSettings.getSoundVolumeLevel());
+            SmallFont::drawString(display, 50, yPos, val, COLOR_YELLOW);
+        } else if (actualIndex == SETTING_SIMON_DIFFICULTY) {
+            const uint8_t d = globalSettings.getSimonDifficulty();
+            const char* val = (d == 0) ? "EASY" : (d == 1) ? "MED" : "HARD";
+            SmallFont::drawString(display, 50, yPos, val, COLOR_YELLOW);
+        } else if (actualIndex == SETTING_SIMON_LIVES) {
+            char val[4];
+            snprintf(val, sizeof(val), "%d", (int)globalSettings.getSimonLives());
             SmallFont::drawString(display, 50, yPos, val, COLOR_YELLOW);
         }
     }
@@ -290,6 +300,22 @@ private:
             }
             case SETTING_SOUND_VOLUME: {
                 globalSettings.adjustSoundVolumeLevel(delta);
+                globalSettings.save();
+                break;
+            }
+            case SETTING_SIMON_DIFFICULTY: {
+                const int cur = (int)globalSettings.getSimonDifficulty();
+                int next = cur + delta;
+                if (next < (int)Settings::SIMON_DIFFICULTY_MIN) next = (int)Settings::SIMON_DIFFICULTY_MAX;
+                if (next > (int)Settings::SIMON_DIFFICULTY_MAX) next = (int)Settings::SIMON_DIFFICULTY_MIN;
+                globalSettings.setSimonDifficulty((uint8_t)next);
+                globalSettings.save();
+                break;
+            }
+            case SETTING_SIMON_LIVES: {
+                int next = (int)globalSettings.getSimonLives() + delta;
+                next = constrain(next, (int)Settings::SIMON_LIVES_MIN, (int)Settings::SIMON_LIVES_MAX);
+                globalSettings.setSimonLives((uint8_t)next);
                 globalSettings.save();
                 break;
             }

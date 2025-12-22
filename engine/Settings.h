@@ -14,7 +14,10 @@ public:
         uint8_t brightness;      // Display brightness (0-255)
         uint8_t gameSpeed;        // Game speed multiplier (1-5)
         uint8_t soundEnabled;     // Sound enabled (0 or 1)
-        uint8_t reserved[5];      // Reserved for future settings (reserved[0] = playerColorIndex, reserved[1] = soundVolumeLevel)
+        uint8_t reserved[5];      // Reserved for future settings:
+                                 // reserved[0] = playerColorIndex
+                                 // reserved[1] = soundVolumeLevel
+                                 // reserved[2] = simonDifficulty (0..2)
         uint8_t checksum;         // Simple checksum for validation
     };
     
@@ -25,6 +28,22 @@ public:
     static const uint8_t DEFAULT_SOUND_VOLUME_LEVEL = 6; // 0..10
     static const uint8_t SOUND_VOLUME_MIN = 0;
     static const uint8_t SOUND_VOLUME_MAX = 10;
+
+    // -----------------------------------------------------
+    // Simon difficulty (persisted via reserved[2])
+    // -----------------------------------------------------
+    // 0 = Easy, 1 = Medium, 2 = Hard
+    static const uint8_t DEFAULT_SIMON_DIFFICULTY = 0;
+    static const uint8_t SIMON_DIFFICULTY_MIN = 0;
+    static const uint8_t SIMON_DIFFICULTY_MAX = 2;
+
+    // -----------------------------------------------------
+    // Simon lives (persisted via reserved[3])
+    // -----------------------------------------------------
+    // 1..5
+    static const uint8_t DEFAULT_SIMON_LIVES = 3;
+    static const uint8_t SIMON_LIVES_MIN = 1;
+    static const uint8_t SIMON_LIVES_MAX = 5;
 
     // -----------------------------------------------------
     // Player Color (persisted)
@@ -147,6 +166,8 @@ public:
         }
         data.reserved[0] = DEFAULT_PLAYER_COLOR_INDEX;
         data.reserved[1] = DEFAULT_SOUND_VOLUME_LEVEL;
+        data.reserved[2] = DEFAULT_SIMON_DIFFICULTY;
+        data.reserved[3] = DEFAULT_SIMON_LIVES;
     }
     
     /**
@@ -225,6 +246,28 @@ public:
     void adjustSoundVolumeLevel(int delta) {
         const int lvl = (int)getSoundVolumeLevel() + delta;
         setSoundVolumeLevel((uint8_t)lvl);
+    }
+
+    // -----------------------------------------------------
+    // Simon difficulty (persisted via reserved[2])
+    // -----------------------------------------------------
+    uint8_t getSimonDifficulty() const {
+        return (uint8_t)constrain((int)data.reserved[2], (int)SIMON_DIFFICULTY_MIN, (int)SIMON_DIFFICULTY_MAX);
+    }
+
+    void setSimonDifficulty(uint8_t difficulty) {
+        data.reserved[2] = (uint8_t)constrain((int)difficulty, (int)SIMON_DIFFICULTY_MIN, (int)SIMON_DIFFICULTY_MAX);
+    }
+
+    // -----------------------------------------------------
+    // Simon lives (persisted via reserved[3])
+    // -----------------------------------------------------
+    uint8_t getSimonLives() const {
+        return (uint8_t)constrain((int)data.reserved[3], (int)SIMON_LIVES_MIN, (int)SIMON_LIVES_MAX);
+    }
+
+    void setSimonLives(uint8_t lives) {
+        data.reserved[3] = (uint8_t)constrain((int)lives, (int)SIMON_LIVES_MIN, (int)SIMON_LIVES_MAX);
     }
 
     // -----------------------------------------------------
