@@ -28,9 +28,11 @@ namespace Leaderboard {
 static constexpr int EEPROM_BASE_ADDR = 128;
 
 static constexpr uint32_t MAGIC = 0x4C424452; // 'LBDR'
-static constexpr uint8_t VERSION = 2;
+static constexpr uint8_t VERSION = 3;
 
-static constexpr uint8_t MAX_GAMES = 12;
+// EEPROM arena is 1024 bytes (see EepromManager). With Entry ~= 52 bytes,
+// MAX_GAMES=16 keeps storage under the available arena (starting at 128).
+static constexpr uint8_t MAX_GAMES = 16;
 static constexpr uint8_t TOP_SCORES = 5;
 static constexpr uint8_t NAME_LEN = 7; // visible characters (stored as NAME_LEN+1 with NUL)
 

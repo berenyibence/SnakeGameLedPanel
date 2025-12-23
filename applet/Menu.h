@@ -10,8 +10,8 @@
 class Menu : public ListModel {
 public:
     // Main menu options (actual indices). Keep Settings LAST (engine treats it specially).
-    const char* options[14] = { "Snake", "Tron", "Pong", "Breakout", "Shooter", "Labyrinth", "Tetris", "Asteroids", "Music", "MVisual", "Bomber", "Simon", "Leaderboard", "Settings" };
-    static const int NUM_OPTIONS = 14;
+    const char* options[18] = { "Snake", "Tron", "Pong", "Breakout", "Shooter", "Labyrinth", "Tetris", "Asteroids", "Music", "MVisual", "Bomber", "Simon", "Dino", "Mines", "Matrix", "Lava", "Leaderboard", "Settings" };
+    static const int NUM_OPTIONS = 18;
 
     // Reusable list widget state (selection + scrolling + input).
     ScrollableList list;
@@ -60,20 +60,21 @@ public:
         };
         const uint16_t offC = d->color565(90, 90, 90);
 
-        // P1..P4 tokens: compute exact bounds to avoid wrapping (the last character can spill).
+        // P1..P4 tokens: flush-right, no extra gaps.
+        // We intentionally draw tokens with a tiny overlap to avoid perceived "spaces" between them.
         d->setFont(&TomThumb);
         int16_t x1 = 0, y1 = 0;
         uint16_t w = 0, h = 0;
         d->getTextBounds("P4", 0, 0, &x1, &y1, &w, &h);
         const int tokenW = (int)w;
-        static constexpr int TOKEN_GAP = 0; // no gaps; keep on one line
-        const int totalW = MAX_GAMEPADS * tokenW + (MAX_GAMEPADS - 1) * TOKEN_GAP;
-        // Flush-right: last pixel of the last token should land on PANEL_RES_X-1.
+        static constexpr int TOKEN_OVERLAP = 1; // overlap by 1px between tokens
+        const int totalW = MAX_GAMEPADS * tokenW - (MAX_GAMEPADS - 1) * TOKEN_OVERLAP;
+        // Fully flush-right: right edge at PANEL_RES_X.
         int px = PANEL_RES_X - totalW;
         for (int i = 0; i < MAX_GAMEPADS; i++) {
             const bool connected = (input && input->getController(i) != nullptr);
             SmallFont::drawStringF(d, px, 6, connected ? pColors[i] : offC, "P%d", i + 1);
-            px += tokenW + TOKEN_GAP;
+            px += tokenW - TOKEN_OVERLAP;
         }
 
         // Draw list below HUD using the reusable widget.
