@@ -27,7 +27,8 @@ private:
     bool onGround = true;
 
     Obstacle obs[6];
-    float nextSpawnX = 80.0f;
+    float spawnDistLeft = 60.0f;   // pixels to travel until next obstacle spawn
+    float distancePx = 0.0f;       // total traveled distance in pixels (for speed ramp + score)
 
     uint32_t score = 0;
     bool gameOver = false;
@@ -63,14 +64,8 @@ private:
         }
     }
 
-    void updateSpawns() {
-        // Keep at least one obstacle on screen.
-        float farthest = 0;
-        for (auto &o : obs) if (o.active && o.x > farthest) farthest = o.x;
-        if (farthest < nextSpawnX) {
-            spawnObstacle(nextSpawnX);
-            nextSpawnX += (float)random((int)Cfg::OBSTACLE_MIN_GAP, (int)Cfg::OBSTACLE_MAX_GAP);
-        }
+    void resetSpawnDistance() {
+        spawnDistLeft = (float)random((int)Cfg::OBSTACLE_MIN_GAP, (int)Cfg::OBSTACLE_MAX_GAP);
     }
 
     bool collideDinoObstacle(const Obstacle& o) const {
@@ -93,7 +88,8 @@ public:
         dinoVy = 0;
         onGround = true;
         for (auto &o : obs) o.active = false;
-        nextSpawnX = 80.0f;
+        distancePx = 0.0f;
+        resetSpawnDistance();
         score = 0;
         gameOver = false;
         lastMs = millis();
@@ -107,6 +103,8 @@ public:
         const uint32_t now = millis();
         const float dt = min(0.05f, (float)(now - lastMs) / 1000.0f);
         lastMs = now;
+        // Normalize to a ~60fps timestep so the game plays consistently regardless of loop rate.
+        const float step = dt * 60.0f;
 
         ControllerPtr ctl = input ? input->getController(0) : nullptr;
         if (ctl && (aEdge(ctl) || (ctl->dpad() & 0x01))) {
@@ -117,9 +115,9 @@ public:
         }
 
         // Physics
-        dinoVy += Cfg::GRAVITY;
+        dinoVy += Cfg::GRAVITY * step;
         if (dinoVy > Cfg::MAX_FALL_VY) dinoVy = Cfg::MAX_FALL_VY;
-        dinoY += dinoVy;
+        dinoY += dinoVy * step;
         const float groundY = (float)Cfg::GROUND_Y - (float)Cfg::DINO_H;
         if (dinoY >= groundY) {
             dinoY = groundY;
@@ -127,16 +125,23 @@ public:
             onGround = true;
         }
 
-        // Speed scales slowly with score
-        const float speed = (float)Cfg::BASE_SPEED_PX + (float)min(6u, score / 600u);
+        // Speed: start slow, then ramp up very gradually with distance.
+        const float speed = (float)Cfg::BASE_SPEED_PX
+            + min((float)Cfg::MAX_SPEED_BONUS_PX, distancePx * (float)Cfg::SPEEDUP_PER_PX);
+        const float move = speed * step;
 
         // Obstacles move
         for (auto &o : obs) {
             if (!o.active) continue;
-            o.x -= speed;
+            o.x -= move;
             if (o.x < -10) o.active = false;
         }
-        updateSpawns();
+        // Spawn pacing: distance-based spacing (prevents "instant wall of obstacles").
+        spawnDistLeft -= move;
+        if (spawnDistLeft <= 0.0f) {
+            spawnObstacle((float)PANEL_RES_X + 10.0f);
+            resetSpawnDistance();
+        }
 
         for (auto &o : obs) {
             if (collideDinoObstacle(o)) {
@@ -147,12 +152,14 @@ public:
 
         // Parallax offsets
         for (int i = 0; i < Cfg::LAYER_COUNT; i++) {
-            layerOff[i] += speed * Cfg::LAYER_SPEED[i];
+            layerOff[i] += move * Cfg::layerSpeed((uint8_t)i);
             if (layerOff[i] > 64.0f) layerOff[i] -= 64.0f;
         }
 
         // Score by distance
-        score += (uint32_t)(speed * 2.0f);
+        distancePx += move;
+        const uint32_t newScore = (uint32_t)distancePx;
+        if (newScore > score) score = newScore;
     }
 
     void draw(MatrixPanel_I2S_DMA* d) override {

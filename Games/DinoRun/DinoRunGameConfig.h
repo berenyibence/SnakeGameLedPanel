@@ -16,14 +16,23 @@ static constexpr float GRAVITY = 0.85f;
 static constexpr float JUMP_VY = -10.5f;
 static constexpr float MAX_FALL_VY = 12.0f;
 
-static constexpr uint16_t BASE_SPEED_PX = 2;  // scrolling speed
+// Gameplay pacing (tuned for playability on the 64x64 panel).
+// The game logic is normalized to a ~60fps timestep (see DinoRunGame::update()).
+static constexpr float BASE_SPEED_PX = 0.35f;          // pixels per "60fps frame"
+static constexpr float MAX_SPEED_BONUS_PX = 0.75f;     // extra speed at long distances
+static constexpr float SPEEDUP_PER_PX = 0.00020f;      // +speed per traveled pixel (very gradual)
 
-static constexpr uint16_t OBSTACLE_MIN_GAP = 22;
-static constexpr uint16_t OBSTACLE_MAX_GAP = 44;
+// Obstacle spacing (pixels). Larger gaps = easier.
+static constexpr uint16_t OBSTACLE_MIN_GAP = 42;
+static constexpr uint16_t OBSTACLE_MAX_GAP = 84;
 
 // Parallax factors
 static constexpr uint8_t LAYER_COUNT = 3;
-static constexpr float LAYER_SPEED[LAYER_COUNT] = { 0.35f, 0.60f, 1.0f };
+// NOTE: Use a constexpr function instead of a static constexpr array to avoid
+// undefined-reference/linker issues on some Arduino toolchains (C++11 ODR rules).
+static constexpr float layerSpeed(uint8_t i) {
+    return (i == 0) ? 0.35f : (i == 1) ? 0.60f : 1.0f;
+}
 
 };
 
