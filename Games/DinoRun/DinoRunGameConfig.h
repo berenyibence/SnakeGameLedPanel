@@ -2,7 +2,8 @@
 #include <Arduino.h>
 #include "../../engine/config.h"
 
-namespace DinoRunConfig {
+// NOTE: struct (not namespace) so it can be used via `using Cfg = DinoRunConfig;`
+struct DinoRunConfig {
 
 static constexpr int HUD_H = 8;
 
@@ -24,6 +25,6 @@ static constexpr uint16_t OBSTACLE_MAX_GAP = 44;
 static constexpr uint8_t LAYER_COUNT = 3;
 static constexpr float LAYER_SPEED[LAYER_COUNT] = { 0.35f, 0.60f, 1.0f };
 
-} // namespace DinoRunConfig
+};
 
 
