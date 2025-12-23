@@ -141,6 +141,18 @@ private:
     static inline bool dRight(uint8_t d) { return (d & 0x04) != 0; }
     static inline bool dLeft(uint8_t d) { return (d & 0x08) != 0; }
 
+    static inline uint16_t dim565(uint16_t c, uint8_t amount /*0..255*/) {
+        // Linear dimming in RGB565 space (cheap + good enough for LED panel UI).
+        // amount=255 -> unchanged; amount=0 -> black.
+        const uint16_t r = (uint16_t)((c >> 11) & 0x1F);
+        const uint16_t g = (uint16_t)((c >> 5) & 0x3F);
+        const uint16_t b = (uint16_t)(c & 0x1F);
+        const uint16_t rr = (uint16_t)((r * amount) / 255);
+        const uint16_t gg = (uint16_t)((g * amount) / 255);
+        const uint16_t bb = (uint16_t)((b * amount) / 255);
+        return (uint16_t)((rr << 11) | (gg << 5) | bb);
+    }
+
     static inline int toPx(int g) { return g * Cfg::CELL; }
 
     bool inBounds(int x, int y) const {

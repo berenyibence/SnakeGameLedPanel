@@ -2,7 +2,10 @@
 #include <Arduino.h>
 #include "../../engine/config.h"
 
-namespace BomberManGameConfig {
+// NOTE:
+// This is a struct (not a namespace) so it can be used via a type alias (e.g. `using Cfg = BomberManGameConfig;`)
+// inside game classes. Arduino's build system can be picky with namespace-alias patterns across translation units.
+struct BomberManGameConfig {
 
 // Display / grid
 static constexpr int HUD_H = 8;
@@ -54,6 +57,6 @@ static constexpr uint16_t COL_GATE_LOCKED = COLOR_BLUE;
 static constexpr uint16_t COL_GATE_OPEN = COLOR_GREEN;
 static constexpr uint16_t COL_ENEMY = COLOR_MAGENTA;
 
-} // namespace BomberManGameConfig
+};
 
 
